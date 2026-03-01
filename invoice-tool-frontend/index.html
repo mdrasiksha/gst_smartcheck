@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>GST Invoice to Excel - Beta</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+
+<div class="bg-white p-8 rounded-xl shadow-lg w-full max-w-md">
+
+    <h1 class="text-2xl font-bold text-center mb-2">
+        GST Invoice to Excel
+    </h1>
+
+    <p class="text-center text-gray-600 mb-6">
+        🚀 Beta Version – 10 Free Uploads
+    </p>
+
+    <form id="uploadForm">
+
+        <label class="block mb-2 font-medium">Email</label>
+        <input
+            type="email"
+            id="email"
+            required
+            class="w-full p-2 border rounded mb-4"
+            placeholder="example@gmail.com"
+        >
+
+        <label class="block mb-2 font-medium">Upload Invoice (PDF)</label>
+        <input
+            type="file"
+            id="invoiceFile"
+            accept=".pdf"
+            required
+            class="w-full mb-4"
+        >
+
+        <button
+            type="submit"
+            class="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700"
+        >
+            Upload & Convert
+        </button>
+    </form>
+
+    <p id="statusMessage" class="text-center text-sm mt-4"></p>
+
+    <p class="text-xs text-gray-500 mt-6 text-center">
+        ⚠ Please verify extracted data before GST filing.
+        Files are auto-deleted within 24 hours.
+    </p>
+
+</div>
+
+<script>
+document.getElementById("uploadForm").addEventListener("submit", async function(e){
+    e.preventDefault();
+
+    const status = document.getElementById("statusMessage");
+    status.innerText = "Processing...";
+
+    const email = document.getElementById("email").value;
+    const file = document.getElementById("invoiceFile").files[0];
+
+    const formData = new FormData();
+    formData.append("email", email);
+    formData.append("file", file);
+
+    try {
+        const response = await fetch("http://127.0.0.1:8000/upload", {
+            method: "POST",
+            body: formData
+        });
+
+        if (response.ok) {
+            const blob = await response.blob();
+            const link = document.createElement("a");
+            link.href = window.URL.createObjectURL(blob);
+            link.download = "invoice_output.xlsx";
+            link.click();
+            status.innerText = "✅ Success! File downloaded.";
+        } else {
+            const errorData = await response.json();
+            status.innerText = "❌ " + errorData.error;
+        }
+
+    } catch (error) {
+        status.innerText = "❌ Backend not running.";
+    }
+});
+</script>
+
+</body>
+</html>

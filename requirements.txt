@@ -1,0 +1,13 @@
+streamlit
+pytesseract
+pdf2image
+opencv-python
+numpy
+pandas
+openpyxl
+Pillow
+fastapi
+uvicorn
+python-multipart
+openpyxl
+pandas

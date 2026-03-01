@@ -1,0 +1,93 @@
+🟢 Month 1–2: Build Strong Foundation
+
+If choosing Cyber Security:
+
+Networking basics
+
+Linux basics
+
+Install Kali Linux
+
+Learn Nmap, Wireshark
+
+If choosing Data/ML:
+
+Python (very strong)
+
+Pandas
+
+NumPy
+
+Data visualization
+
+Study daily: 4–5 hours
+
+🟢 Month 3–4: Build 3 Practical Projects
+
+This is where your confidence will grow.
+
+Example Projects (Data/ML)
+
+Sales Data Analysis
+
+Student Result Prediction
+
+Loan Approval Prediction
+
+Example Projects (Cyber Security)
+
+Network scan report using Nmap
+
+Vulnerability analysis report
+
+Packet analysis using Wireshark
+
+Put everything on GitHub.
+
+🟢 Month 5: Resume + LinkedIn + Mock Interviews
+
+Create strong LinkedIn profile
+
+Post your learning weekly
+
+Practice explaining projects loudly
+
+Prepare gap explanation (short & confident)
+
+Gap explanation example:
+
+“I took a career break due to personal responsibilities. During this time I developed strong discipline and planning skills. Now I have upskilled in ___ and completed hands-on projects.”
+
+Say it confidently. No guilt.
+
+🟢 Month 6: Apply Smartly
+
+Apply for:
+
+Internships
+
+Returnship programs
+
+Startup roles
+
+Remote roles
+
+Search for:
+
+“Women returnship programs”
+
+“Career restart programs India”
+
+Many companies now support women returners.
+
+💡 Very Important Advice For You
+
+Do NOT:
+
+Compare with freshers
+
+Feel late
+
+Overthink age
+
+Tech field respects skill more than age.
