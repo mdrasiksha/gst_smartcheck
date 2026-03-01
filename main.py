@@ -11,6 +11,13 @@ def _extract_data_from_pdf_input(pdf_input):
         raise ValueError("OCR failed or insufficient text extracted")
 
     data = extract_with_audit(text)
+
+    if data.get("Requires Manual Review"):
+        retry_text = extract_text_from_pdf(pdf_input, force_ocr=True)
+        retry_data = extract_with_audit(retry_text)
+        if not retry_data.get("Requires Manual Review"):
+            data = retry_data
+
     status = validate_invoice(data)
     return data, status
 

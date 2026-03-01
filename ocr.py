@@ -7,6 +7,14 @@ from pypdf import PdfReader
 PdfInput = Union[str, bytes]
 
 
+class PDFExtractionError(Exception):
+    """Raised when PDF parsing fails before OCR fallback can recover."""
+
+
+class OCREngineError(Exception):
+    """Raised when OCR dependencies or OCR processing fails."""
+
+
 def _extract_text_with_pypdf(pdf_input: PdfInput) -> str:
     if isinstance(pdf_input, bytes):
         reader = PdfReader(BytesIO(pdf_input))
@@ -49,17 +57,24 @@ def _extract_text_with_ocr(pdf_input: PdfInput) -> str:
     return "\n".join(ocr_pages).strip()
 
 
-def extract_text_from_pdf(pdf_input: PdfInput) -> str:
-    direct_text = _extract_text_with_pypdf(pdf_input)
-    if len(direct_text) >= 100:
-        return direct_text
+def extract_text_from_pdf(pdf_input: PdfInput, force_ocr: bool = False) -> str:
+    direct_text = ""
+
+    if not force_ocr:
+        try:
+            direct_text = _extract_text_with_pypdf(pdf_input)
+        except Exception as exc:
+            raise PDFExtractionError("Unable to parse PDF text content.") from exc
+
+        if len(direct_text) >= 100:
+            return direct_text
 
     try:
         ocr_text = _extract_text_with_ocr(pdf_input)
     except Exception as exc:
         if direct_text:
             return direct_text
-        raise ValueError(
+        raise OCREngineError(
             "No extractable text found and OCR fallback failed. "
             "Install/verify Tesseract and Poppler to process scanned PDFs."
         ) from exc
