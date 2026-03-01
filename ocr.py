@@ -1,10 +1,19 @@
+from io import BytesIO
+from typing import Union
+
 from pypdf import PdfReader
 
 
-def _extract_text_with_pypdf(pdf_path: str) -> str:
-    reader = PdfReader(pdf_path)
-    pages = []
+PdfInput = Union[str, bytes]
 
+
+def _extract_text_with_pypdf(pdf_input: PdfInput) -> str:
+    if isinstance(pdf_input, bytes):
+        reader = PdfReader(BytesIO(pdf_input))
+    else:
+        reader = PdfReader(pdf_input)
+
+    pages = []
     for page in reader.pages:
         page_text = page.extract_text() or ""
         if page_text.strip():
@@ -13,7 +22,7 @@ def _extract_text_with_pypdf(pdf_path: str) -> str:
     return "\n".join(pages).strip()
 
 
-def _extract_text_with_ocr(pdf_path: str) -> str:
+def _extract_text_with_ocr(pdf_input: PdfInput) -> str:
     """
     OCR fallback for scanned/image-based PDFs.
 
@@ -23,10 +32,13 @@ def _extract_text_with_ocr(pdf_path: str) -> str:
       - poppler binaries available in PATH
       - tesseract binaries available in PATH
     """
-    from pdf2image import convert_from_path
+    from pdf2image import convert_from_bytes, convert_from_path
     import pytesseract
 
-    images = convert_from_path(pdf_path, dpi=300)
+    if isinstance(pdf_input, bytes):
+        images = convert_from_bytes(pdf_input, dpi=300)
+    else:
+        images = convert_from_path(pdf_input, dpi=300)
 
     ocr_pages = []
     for image in images:
@@ -37,13 +49,13 @@ def _extract_text_with_ocr(pdf_path: str) -> str:
     return "\n".join(ocr_pages).strip()
 
 
-def extract_text_from_pdf(pdf_path: str) -> str:
-    direct_text = _extract_text_with_pypdf(pdf_path)
-    if len(direct_text) >= 50:
+def extract_text_from_pdf(pdf_input: PdfInput) -> str:
+    direct_text = _extract_text_with_pypdf(pdf_input)
+    if len(direct_text) >= 100:
         return direct_text
 
     try:
-        ocr_text = _extract_text_with_ocr(pdf_path)
+        ocr_text = _extract_text_with_ocr(pdf_input)
     except Exception as exc:
         if direct_text:
             return direct_text

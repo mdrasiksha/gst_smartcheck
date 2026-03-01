@@ -1,5 +1,31 @@
 import re
 
+GSTIN_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def validate_gstin_checksum(gstin: str) -> bool:
+    """Validate a 15-character Indian GSTIN using the official Mod 36 checksum."""
+    if not isinstance(gstin, str):
+        return False
+
+    candidate = gstin.strip().upper()
+    if len(candidate) != 15 or any(ch not in GSTIN_CHARSET for ch in candidate):
+        return False
+
+    factor = 1
+    total = 0
+
+    for char in candidate[:14]:
+        code_point = GSTIN_CHARSET.index(char)
+        addend = factor * code_point
+        factor = 2 if factor == 1 else 1
+        addend = (addend // 36) + (addend % 36)
+        total += addend
+
+    remainder = total % 36
+    check_code_point = (36 - remainder) % 36
+    return candidate[-1] == GSTIN_CHARSET[check_code_point]
+
 
 
 def normalize_text(text: str) -> str:
@@ -87,7 +113,7 @@ def extract_invoice_fields(text: str) -> dict:
     # GST NUMBER
     # =========================================================
     gst = re.search(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b", text)
-    if gst:
+    if gst and validate_gstin_checksum(gst.group()):
         data["GST Number"] = gst.group()
         data["Is GST Invoice"] = True
         data["Confidence"]["GST Number"] = 0.95
