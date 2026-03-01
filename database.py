@@ -56,6 +56,61 @@ def upload_invoice_pdf(file_name: str, pdf_bytes: bytes) -> str:
     return storage_path
 
 
+def get_public_invoice_url(storage_path: str) -> str:
+    client = _get_client()
+    response = client.storage.from_("invoices").get_public_url(storage_path)
+    if isinstance(response, dict):
+        return response.get("publicUrl") or response.get("publicURL") or ""
+    return str(response)
+
+
 def download_invoice_pdf(storage_path: str) -> bytes:
     client = _get_client()
     return client.storage.from_("invoices").download(storage_path)
+
+
+def save_invoice_metadata(email, data, file_url, status):
+    """Stores extraction output metadata for dashboard history."""
+    client = _get_client()
+    client.table("invoices").insert(
+        {
+            "email": email,
+            "invoice_no": data.get("Invoice Number"),
+            "invoice_date": data.get("Invoice Date"),
+            "total_amount": data.get("Final Amount"),
+            "gst_amount": (
+                (data.get("CGST Amount") or 0)
+                + (data.get("SGST Amount") or 0)
+                + (data.get("IGST Amount") or 0)
+            ),
+            "file_url": file_url,
+            "status": status,
+        }
+    ).execute()
+
+
+def get_invoice_history(email, limit=10):
+    """Retrieves recent invoice metadata rows for one user."""
+    client = _get_client()
+    response = (
+        client.table("invoices")
+        .select("id,created_at,invoice_no,invoice_date,total_amount,gst_amount,file_url,status")
+        .eq("email", email)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return response.data or []
+
+
+def get_invoice_by_id(invoice_id):
+    client = _get_client()
+    response = (
+        client.table("invoices")
+        .select("id,invoice_no,invoice_date,total_amount,gst_amount")
+        .eq("id", invoice_id)
+        .limit(1)
+        .execute()
+    )
+    rows = response.data or []
+    return rows[0] if rows else None
