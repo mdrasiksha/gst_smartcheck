@@ -78,3 +78,7 @@ async def upload_invoice(
             status_code=400,
             content={"error": str(e)}
         )
+
+@app.get("/test")
+def test():
+    return {"status": "CORS version running"}
