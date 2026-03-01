@@ -2,6 +2,9 @@ def validate_invoice(data):
     if not data:
         return "INVALID DATA"
 
+    if data.get("Requires Manual Review"):
+        return "REQUIRES MANUAL REVIEW"
+
     final_amount = data.get("Final Amount")
     if not final_amount:
         return "FINAL AMOUNT MISSING"

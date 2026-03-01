@@ -1,4 +1,5 @@
 import re
+from typing import Dict
 
 GSTIN_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -67,6 +68,85 @@ def is_non_invoice_identifier(value: str) -> bool:
 
 
 applied_rules = []
+
+
+def _is_close(left: float, right: float, tolerance: float = 1.5) -> bool:
+    return abs((left or 0.0) - (right or 0.0)) <= tolerance
+
+
+def _validate_tax_math(data: Dict) -> tuple[bool, float]:
+    taxable = float(data.get("Taxable Amount") or 0)
+    cgst = float(data.get("CGST Amount") or 0)
+    sgst = float(data.get("SGST Amount") or 0)
+    igst = float(data.get("IGST Amount") or 0)
+    final_amount = data.get("Final Amount")
+
+    if final_amount is None:
+        return False, 0.0
+
+    tax_value = igst if igst > 0 else (cgst + sgst)
+    expected = round(taxable + tax_value, 2)
+    actual = float(final_amount)
+    return _is_close(expected, actual), expected
+
+
+def _retry_with_aggressive_patterns(text: str, data: Dict) -> Dict:
+    retry_data = dict(data)
+
+    total_patterns = [
+        r"(?:TOTAL\s*AMOUNT|GRAND\s*TOTAL|AMOUNT\s*PAYABLE|NET\s*PAYABLE)[^\d]{0,25}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)",
+        r"\bTOTAL\b[^\d]{0,15}(\d{3,}(?:\.\d{1,2})?)",
+    ]
+    taxable_patterns = [
+        r"(?:TAXABLE\s*VALUE|TAXABLE\s*AMOUNT|SUB\s*TOTAL|BASIC\s*AMOUNT)[^\d]{0,20}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)",
+    ]
+
+    if retry_data.get("Final Amount") in (None, 0):
+        for pattern in total_patterns:
+            match = re.search(pattern, text)
+            if match:
+                retry_data["Final Amount"] = float(match.group(1).replace(",", ""))
+                retry_data.setdefault("Confidence", {})["Final Amount"] = 0.75
+                break
+
+    if retry_data.get("Taxable Amount") in (None, 0):
+        for pattern in taxable_patterns:
+            match = re.search(pattern, text)
+            if match:
+                taxable_val = float(match.group(1).replace(",", ""))
+                retry_data["Taxable Amount"] = taxable_val
+                retry_data["Sub Total"] = taxable_val
+                retry_data.setdefault("Confidence", {})["Taxable Amount"] = 0.75
+                break
+
+    return retry_data
+
+
+def run_validation_engine(text: str, data: Dict) -> Dict:
+    validated = dict(data)
+    validated.setdefault("Confidence", {})
+
+    for key in ("Taxable Amount", "CGST Amount", "SGST Amount", "IGST Amount", "Final Amount"):
+        validated["Confidence"].setdefault(key, 0.4 if validated.get(key) is None else 0.7)
+
+    is_valid, expected = _validate_tax_math(validated)
+    if not is_valid:
+        validated = _retry_with_aggressive_patterns(text, validated)
+        is_valid, expected = _validate_tax_math(validated)
+
+    validated["Validation"] = "Verified" if is_valid else "Math Mismatch"
+    validated["Requires Manual Review"] = bool((validated.get("Final Amount") in (None, 0)) or not is_valid)
+    validated["Math Expected Total"] = expected
+
+    if validated["Requires Manual Review"]:
+        validated["Confidence"]["Final Amount"] = min(validated["Confidence"].get("Final Amount", 0.7), 0.4)
+
+    if validated["Confidence"]:
+        validated["Overall Confidence"] = round(sum(validated["Confidence"].values()) / len(validated["Confidence"]) * 100, 2)
+
+    return validated
+
+
 def extract_invoice_fields(text: str) -> dict:
     applied_rules = []
     text = normalize_text(text)
@@ -830,9 +910,7 @@ def extract_invoice_fields(text: str) -> dict:
 
     data["_rules_applied"] = applied_rules
 
-    return data
-
-
+    return run_validation_engine(text, data)
 
 
 

@@ -17,11 +17,11 @@ EXCEL_COLUMNS = [
     "SGST",
     "IGST",
     "Total",
+    "Validation",
     "Validation Status",
     "Confidence Score",
     "Source File Name",
 ]
-
 
 NUMERIC_COLUMNS = ["Taxable Value", "CGST", "SGST", "IGST", "Total", "Confidence Score"]
 
@@ -44,28 +44,23 @@ def _normalize_date(value):
     if value in (None, ""):
         return None
 
-    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d.%m.%Y", "%d %m %Y", "%d-%b-%Y"):
-        try:
-            return datetime.strptime(str(value).strip(), fmt)
-        except ValueError:
-            continue
-
     parsed = pd.to_datetime(value, errors="coerce", dayfirst=True)
     if pd.isna(parsed):
         return None
-    return parsed.to_pydatetime()
+    return parsed.strftime("%Y-%m-%d")
 
 
 def _prepare_row(data, status):
     row = {
         "Invoice No": _first_available(data, ["Invoice Number", "Invoice No"]),
         "Date": _normalize_date(_first_available(data, ["Invoice Date", "Date"])),
-        "GSTIN": _first_available(data, ["GST Number", "GSTIN"]),
+        "GSTIN": str(_first_available(data, ["GST Number", "GSTIN"], default="") or "").upper() or None,
         "Taxable Value": _first_available(data, ["Taxable Amount", "Taxable Value"]),
         "CGST": _first_available(data, ["CGST Amount", "CGST"]),
         "SGST": _first_available(data, ["SGST Amount", "SGST"]),
         "IGST": _first_available(data, ["IGST Amount", "IGST"]),
         "Total": _first_available(data, ["Final Amount", "Total"]),
+        "Validation": data.get("Validation", "Math Mismatch"),
         "Validation Status": status,
         "Confidence Score": _extract_confidence_score(data),
         "Source File Name": _first_available(data, ["Source File Name", "File Name", "Filename"]),
@@ -81,73 +76,48 @@ def _prepare_row(data, status):
 
 def write_to_excel(data, status, output_path):
     df = _prepare_row(data, status)
-
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, startrow=3)
+        df.to_excel(writer, index=False)
 
     wb = load_workbook(output_path)
     ws = wb.active
 
-    ws.merge_cells("A1:K1")
-    ws["A1"] = "GST SmartCheck Audit Report"
-    ws["A2"] = f"Extraction Date: {datetime.now().strftime('%d-%b-%Y %H:%M:%S')}"
-
-    title_font = Font(size=14, bold=True)
-    subtitle_font = Font(italic=True)
-    ws["A1"].font = title_font
-    ws["A2"].font = subtitle_font
-
     header_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
-    success_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-    error_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    verified_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    mismatch_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     header_font = Font(bold=True)
     center_align = Alignment(horizontal="center", vertical="center")
-    left_align = Alignment(horizontal="left", vertical="center")
-
     thin_border = Border(
-        left=Side(style="thin"),
-        right=Side(style="thin"),
-        top=Side(style="thin"),
-        bottom=Side(style="thin"),
+        left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin")
     )
 
-    header_row = 4
-    data_row = 5
-
-    for cell in ws[header_row]:
+    for cell in ws[1]:
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = center_align
         cell.border = thin_border
 
-    for row in ws.iter_rows(min_row=data_row, max_row=ws.max_row):
+    validation_col = EXCEL_COLUMNS.index("Validation") + 1
+    gst_col = EXCEL_COLUMNS.index("GSTIN") + 1
+
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
         for cell in row:
-            cell.alignment = left_align
             cell.border = thin_border
 
-    date_col = EXCEL_COLUMNS.index("Date") + 1
-    for row_idx in range(data_row, ws.max_row + 1):
-        date_cell = ws.cell(row=row_idx, column=date_col)
-        if date_cell.value:
-            date_cell.number_format = "DD-MMM-YYYY"
+        validation_cell = row[validation_col - 1]
+        validation_value = str(validation_cell.value or "").strip().lower()
+        validation_cell.fill = verified_fill if validation_value == "verified" else mismatch_fill
+        validation_cell.font = Font(bold=True)
 
-    gstin_col = EXCEL_COLUMNS.index("GSTIN") + 1
-    status_col = EXCEL_COLUMNS.index("Validation Status") + 1
-
-    for row_idx in range(data_row, ws.max_row + 1):
-        gst_cell = ws.cell(row=row_idx, column=gstin_col)
-        status_cell = ws.cell(row=row_idx, column=status_col)
-
-        if gst_cell.value and not validate_gstin_checksum(str(gst_cell.value)):
-            gst_cell.fill = error_fill
-
-        if str(status_cell.value).strip().lower() == "success":
-            status_cell.fill = success_fill
-            status_cell.font = Font(bold=True)
+        gst_cell = row[gst_col - 1]
+        if gst_cell.value:
+            gst_cell.value = str(gst_cell.value).upper()
+            if not validate_gstin_checksum(str(gst_cell.value)):
+                gst_cell.fill = mismatch_fill
 
     for col_idx in range(1, ws.max_column + 1):
         max_length = 0
-        col_letter = ws.cell(row=header_row, column=col_idx).column_letter
+        col_letter = ws.cell(row=1, column=col_idx).column_letter
         for row_idx in range(1, ws.max_row + 1):
             cell_value = ws.cell(row=row_idx, column=col_idx).value
             if cell_value is not None:
@@ -158,11 +128,10 @@ def write_to_excel(data, status, output_path):
 
 
 def generate_tally_xml(data):
-    """Generate Tally-compliant Sales Voucher XML string from extracted invoice data."""
     row = _prepare_row(data, status=data.get("Validation Status", "Success")).iloc[0].to_dict()
 
     voucher_date = ""
-    if row.get("Date") is not None and not pd.isna(row.get("Date")):
+    if row.get("Date"):
         voucher_date = pd.to_datetime(row["Date"]).strftime("%Y%m%d")
 
     taxable = float(row.get("Taxable Value") or 0)

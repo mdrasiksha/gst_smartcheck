@@ -56,6 +56,23 @@ def upload_invoice_pdf(file_name: str, pdf_bytes: bytes) -> str:
     return storage_path
 
 
+def upload_to_supabase(file_name: str, file_bytes: bytes, bucket: str = "invoices") -> str:
+    client = _get_client()
+    storage_path = f"outputs/{file_name}"
+    client.storage.from_(bucket).upload(
+        storage_path,
+        file_bytes,
+        file_options={
+            "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "upsert": "true",
+        },
+    )
+    response = client.storage.from_(bucket).get_public_url(storage_path)
+    if isinstance(response, dict):
+        return response.get("publicUrl") or response.get("publicURL") or ""
+    return str(response)
+
+
 def get_public_invoice_url(storage_path: str) -> str:
     client = _get_client()
     response = client.storage.from_("invoices").get_public_url(storage_path)

@@ -1,10 +1,13 @@
-from fastapi import FastAPI, UploadFile, File, Form, Query
+from fastapi import FastAPI, UploadFile, File, Form, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import time
 import uuid
 import zipfile
+import tempfile
+
+from pypdf.errors import PdfReadError
 
 from batch_excel_writer import write_batch_summary, generate_tally_sales_xml
 from database import (
@@ -17,21 +20,21 @@ from database import (
     save_invoice_metadata,
     get_invoice_history,
     get_invoice_by_id,
+    upload_to_supabase,
 )
 from main import process_invoice_bytes, process_invoices_bulk
+from ocr import OCREngineError, PDFExtractionError
 
 app = FastAPI()
 
-# Enable CORS (important for frontend connection)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,  # MUST be False when using "*"
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize database
 init_db()
 
 OUTPUT_FOLDER = "outputs"
@@ -50,57 +53,94 @@ def cleanup_old_files():
             os.remove(path)
 
 
+@app.exception_handler(PDFExtractionError)
+@app.exception_handler(PdfReadError)
+@app.exception_handler(OCREngineError)
+async def extraction_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=400,
+        content={
+            "success": False,
+            "error": "Unable to process this PDF. Please upload a clear PDF with readable invoice text.",
+            "details": str(exc),
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "error": "Unexpected server error while processing invoice.",
+            "details": str(exc),
+        },
+    )
+
+
 @app.post("/upload")
-async def upload_invoice(
-    email: str = Form(...),
-    file: UploadFile = File(...)
-):
+async def upload_invoice(email: str = Form(...), file: UploadFile = File(...)):
+    usage = get_usage(email)
+
+    if usage >= MAX_FREE:
+        return JSONResponse(
+            status_code=403,
+            content={"error": "Free limit reached. Please subscribe.", "remaining": 0},
+        )
+
+    pdf_bytes = await file.read()
+    unique_id = str(uuid.uuid4())
+    storage_file_name = f"{unique_id}.pdf"
+    temp_excel_path = None
+
     try:
-        usage = get_usage(email)
-
-        if usage >= MAX_FREE:
-            return JSONResponse(
-                status_code=403,
-                content={"error": "Free limit reached. Please subscribe.", "remaining": 0},
-            )
-
-        pdf_bytes = await file.read()
-
-        unique_id = str(uuid.uuid4())
-        storage_file_name = f"{unique_id}.pdf"
-        output_path = os.path.join(OUTPUT_FOLDER, f"{unique_id}.xlsx")
-
+        # 1) Receive bytes -> 2) Extract
         storage_path = upload_invoice_pdf(storage_file_name, pdf_bytes)
-        file_url = get_public_invoice_url(storage_path)
         stored_pdf_bytes = download_invoice_pdf(storage_path)
 
-        data, status = process_invoice_bytes(stored_pdf_bytes, output_path)
+        # 3) Write Excel using tempfile for collision-free processing
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx", dir=OUTPUT_FOLDER) as tmp_excel:
+            temp_excel_path = tmp_excel.name
 
-        save_invoice_metadata(email, data, file_url, status)
+        data, status = process_invoice_bytes(stored_pdf_bytes, temp_excel_path)
+
+        # 4) Upload to Supabase with upsert=True
+        with open(temp_excel_path, "rb") as excel_file:
+            excel_url = upload_to_supabase(f"{unique_id}.xlsx", excel_file.read())
+
+        # keep source invoice url for history traceability
+        invoice_pdf_url = get_public_invoice_url(storage_path)
+        save_invoice_metadata(email, data, invoice_pdf_url, status)
+
         increment_usage(email)
         remaining = MAX_FREE - get_usage(email)
 
-        cleanup_old_files()
+        gst_total = (
+            (data.get("CGST Amount") or 0)
+            + (data.get("SGST Amount") or 0)
+            + (data.get("IGST Amount") or 0)
+        )
 
         return {
             "success": True,
             "remaining": remaining,
-            "data": {
+            "file_url": excel_url,
+            "data_summary": {
                 "invoice_no": data.get("Invoice Number"),
                 "date": data.get("Invoice Date"),
                 "total": data.get("Final Amount"),
-                "gst": (
-                    (data.get("CGST Amount") or 0)
-                    + (data.get("SGST Amount") or 0)
-                    + (data.get("IGST Amount") or 0)
-                ),
-                "file_url": file_url,
+                "gst": gst_total,
+                "validation": data.get("Validation"),
+                "requires_manual_review": data.get("Requires Manual Review", False),
                 "status": status,
             },
         }
-
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
+    finally:
+        # 5) Cleanup local temp files
+        if temp_excel_path and os.path.exists(temp_excel_path):
+            os.remove(temp_excel_path)
+        cleanup_old_files()
 
 
 @app.post("/upload-bulk")
