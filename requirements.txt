@@ -11,5 +11,6 @@ uvicorn
 python-multipart
 openpyxl
 pandas
-pypdf2
+pypdf
 pdfplumber
+pypdf2
