@@ -4,18 +4,26 @@ from validators import validate_invoice
 from excel_writer import write_to_excel
 
 
-def process_invoice(pdf_path, output_path):
-    text = extract_text_from_pdf(pdf_path)
+def _extract_data_from_pdf_input(pdf_input):
+    text = extract_text_from_pdf(pdf_input)
 
     if not text or len(text.strip()) < 50:
         raise ValueError("OCR failed or insufficient text extracted")
 
     data = extract_with_audit(text)
-
     status = validate_invoice(data)
+    return data, status
 
+
+def process_invoice(pdf_path, output_path):
+    data, status = _extract_data_from_pdf_input(pdf_path)
     write_to_excel(data, status, output_path)
+    return data, status
 
+
+def process_invoice_bytes(pdf_bytes, output_path):
+    data, status = _extract_data_from_pdf_input(pdf_bytes)
+    write_to_excel(data, status, output_path)
     return data, status
 
 
@@ -26,7 +34,7 @@ def process_invoices_bulk(invoice_jobs):
     Args:
         invoice_jobs: iterable of dicts with keys:
             - name: display/original file name
-            - pdf_path: input PDF path
+            - pdf_path or pdf_bytes: input PDF source
             - output_path: target XLSX path
 
     Returns:
@@ -36,11 +44,14 @@ def process_invoices_bulk(invoice_jobs):
 
     for job in invoice_jobs:
         name = job["name"]
-        pdf_path = job["pdf_path"]
         output_path = job["output_path"]
 
         try:
-            data, status = process_invoice(pdf_path, output_path)
+            if "pdf_bytes" in job:
+                data, status = process_invoice_bytes(job["pdf_bytes"], output_path)
+            else:
+                data, status = process_invoice(job["pdf_path"], output_path)
+
             results.append(
                 {
                     "Invoice": name,

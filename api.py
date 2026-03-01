@@ -2,14 +2,19 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
-import shutil
 import time
 import uuid
 import zipfile
 
 from batch_excel_writer import write_batch_summary
-from database import init_db, get_usage, increment_usage
-from main import process_invoice, process_invoices_bulk
+from database import (
+    init_db,
+    get_usage,
+    increment_usage,
+    upload_invoice_pdf,
+    download_invoice_pdf,
+)
+from main import process_invoice_bytes, process_invoices_bulk
 
 app = FastAPI()
 
@@ -25,21 +30,18 @@ app.add_middleware(
 # Initialize database
 init_db()
 
-UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
 MAX_FREE = 10
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 
 def cleanup_old_files():
     now = time.time()
-    for folder in [UPLOAD_FOLDER, OUTPUT_FOLDER]:
-        for file in os.listdir(folder):
-            path = os.path.join(folder, file)
-            if os.path.isfile(path) and now - os.path.getmtime(path) > 86400:
-                os.remove(path)
+    for file in os.listdir(OUTPUT_FOLDER):
+        path = os.path.join(OUTPUT_FOLDER, file)
+        if os.path.isfile(path) and now - os.path.getmtime(path) > 86400:
+            os.remove(path)
 
 
 @app.post("/upload")
@@ -56,17 +58,19 @@ async def upload_invoice(
                 content={"error": "Free limit reached. Please subscribe.", "remaining": 0},
             )
 
+        pdf_bytes = await file.read()
+
         increment_usage(email)
         remaining = MAX_FREE - get_usage(email)
 
         unique_id = str(uuid.uuid4())
-        pdf_path = os.path.join(UPLOAD_FOLDER, f"{unique_id}.pdf")
+        storage_file_name = f"{unique_id}.pdf"
         output_path = os.path.join(OUTPUT_FOLDER, f"{unique_id}.xlsx")
 
-        with open(pdf_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        storage_path = upload_invoice_pdf(storage_file_name, pdf_bytes)
+        stored_pdf_bytes = download_invoice_pdf(storage_path)
 
-        process_invoice(pdf_path, output_path)
+        process_invoice_bytes(stored_pdf_bytes, output_path)
 
         cleanup_old_files()
 
@@ -115,16 +119,16 @@ async def upload_bulk_invoices(
 
             file_id = f"{run_id}_{index}"
             safe_name = os.path.basename(upload_file.filename)
-            pdf_path = os.path.join(UPLOAD_FOLDER, f"{file_id}.pdf")
             output_path = os.path.join(OUTPUT_FOLDER, f"{file_id}.xlsx")
 
-            with open(pdf_path, "wb") as buffer:
-                shutil.copyfileobj(upload_file.file, buffer)
+            pdf_bytes = await upload_file.read()
+            storage_path = upload_invoice_pdf(f"{file_id}.pdf", pdf_bytes)
+            stored_pdf_bytes = download_invoice_pdf(storage_path)
 
             invoice_jobs.append(
                 {
                     "name": safe_name,
-                    "pdf_path": pdf_path,
+                    "pdf_bytes": stored_pdf_bytes,
                     "output_path": output_path,
                 }
             )
