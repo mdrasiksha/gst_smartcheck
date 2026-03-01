@@ -76,15 +76,16 @@ document.getElementById("uploadForm").addEventListener("submit", async function(
         });
 
         if (response.ok) {
+            const remaining = response.headers.get("X-Remaining");
             const blob = await response.blob();
             const link = document.createElement("a");
             link.href = window.URL.createObjectURL(blob);
             link.download = "invoice_output.xlsx";
             link.click();
-            status.innerText = "✅ Success! File downloaded.";
+            status.innerText = `✅ Success! Free uploads remaining: ${remaining}`;
         } else {
             const errorData = await response.json();
-            status.innerText = "❌ " + errorData.error;
+            status.innerText = `❌ ${errorData.error}`;
         }
 
     } catch (error) {
