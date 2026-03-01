@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -6,13 +6,17 @@ import time
 import uuid
 import zipfile
 
-from batch_excel_writer import write_batch_summary
+from batch_excel_writer import write_batch_summary, generate_tally_sales_xml
 from database import (
     init_db,
     get_usage,
     increment_usage,
     upload_invoice_pdf,
     download_invoice_pdf,
+    get_public_invoice_url,
+    save_invoice_metadata,
+    get_invoice_history,
+    get_invoice_by_id,
 )
 from main import process_invoice_bytes, process_invoices_bulk
 
@@ -32,8 +36,10 @@ init_db()
 
 OUTPUT_FOLDER = "outputs"
 MAX_FREE = 10
+TALLY_FOLDER = "exports"
 
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+os.makedirs(TALLY_FOLDER, exist_ok=True)
 
 
 def cleanup_old_files():
@@ -60,28 +66,38 @@ async def upload_invoice(
 
         pdf_bytes = await file.read()
 
-        increment_usage(email)
-        remaining = MAX_FREE - get_usage(email)
-
         unique_id = str(uuid.uuid4())
         storage_file_name = f"{unique_id}.pdf"
         output_path = os.path.join(OUTPUT_FOLDER, f"{unique_id}.xlsx")
 
         storage_path = upload_invoice_pdf(storage_file_name, pdf_bytes)
+        file_url = get_public_invoice_url(storage_path)
         stored_pdf_bytes = download_invoice_pdf(storage_path)
 
-        process_invoice_bytes(stored_pdf_bytes, output_path)
+        data, status = process_invoice_bytes(stored_pdf_bytes, output_path)
+
+        save_invoice_metadata(email, data, file_url, status)
+        increment_usage(email)
+        remaining = MAX_FREE - get_usage(email)
 
         cleanup_old_files()
 
-        headers = {"X-Remaining": str(remaining)}
-
-        return FileResponse(
-            path=output_path,
-            filename="invoice_output.xlsx",
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers=headers,
-        )
+        return {
+            "success": True,
+            "remaining": remaining,
+            "data": {
+                "invoice_no": data.get("Invoice Number"),
+                "date": data.get("Invoice Date"),
+                "total": data.get("Final Amount"),
+                "gst": (
+                    (data.get("CGST Amount") or 0)
+                    + (data.get("SGST Amount") or 0)
+                    + (data.get("IGST Amount") or 0)
+                ),
+                "file_url": file_url,
+                "status": status,
+            },
+        }
 
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -167,6 +183,35 @@ async def upload_bulk_invoices(
 @app.get("/test")
 def test():
     return {"status": "CORS version running"}
+
+
+@app.get("/history")
+async def fetch_history(email: str = Query(...), limit: int = Query(10, ge=1, le=25)):
+    history = get_invoice_history(email, limit=limit)
+    return {"history": history}
+
+
+@app.get("/export/tally")
+async def export_tally(invoice_id: str = Query(...)):
+    row = get_invoice_by_id(invoice_id)
+    if not row:
+        return JSONResponse(status_code=404, content={"error": "Invoice not found"})
+
+    xml_data = {
+        "Date": row.get("invoice_date") or "",
+        "GSTIN": "",
+        "Total": row.get("total_amount") or 0,
+        "Tax": row.get("gst_amount") or 0,
+    }
+
+    xml_path = os.path.join(TALLY_FOLDER, f"tally_{invoice_id}.xml")
+    generate_tally_sales_xml(xml_data, xml_path)
+
+    return FileResponse(
+        path=xml_path,
+        filename=f"tally_{row.get('invoice_no') or invoice_id}.xml",
+        media_type="application/xml",
+    )
 
 
 cleanup_old_files()
