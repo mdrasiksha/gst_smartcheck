@@ -93,6 +93,7 @@ def test():
 
 
 def cleanup_old_files():
+    print("Cleanup function running...")
     now = time.time()
     for folder in [UPLOAD_FOLDER, OUTPUT_FOLDER]:
         for file in os.listdir(folder):
