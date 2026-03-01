@@ -1,10 +1,115 @@
-import pandas as pd
+from datetime import datetime
 import xml.etree.ElementTree as ET
+
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+from ai_extractor import validate_gstin_checksum
+
+BATCH_COLUMNS = [
+    "Source File Name",
+    "Invoice No",
+    "Date",
+    "GSTIN",
+    "Taxable Value",
+    "CGST",
+    "SGST",
+    "IGST",
+    "Total",
+    "Validation Status",
+    "Confidence Score",
+    "Rules Applied",
+    "Output File",
+]
+
+NUMERIC_COLUMNS = ["Taxable Value", "CGST", "SGST", "IGST", "Total", "Confidence Score"]
 
 
 def write_batch_summary(results, output_path):
-    df = pd.DataFrame(results)
-    df.to_excel(output_path, index=False)
+    rows = []
+    for result in results:
+        row = {col: result.get(col) for col in BATCH_COLUMNS}
+        rows.append(row)
+
+    df = pd.DataFrame(rows, columns=BATCH_COLUMNS)
+
+    for col in NUMERIC_COLUMNS:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "Date" in df:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=True)
+
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, startrow=3)
+
+    wb = load_workbook(output_path)
+    ws = wb.active
+
+    ws.merge_cells(f"A1:{ws.cell(row=1, column=ws.max_column).column_letter}1")
+    ws["A1"] = "GST SmartCheck Audit Report (Batch Summary)"
+    ws["A2"] = f"Extraction Date: {datetime.now().strftime('%d-%b-%Y %H:%M:%S')}"
+    ws["A1"].font = Font(size=14, bold=True)
+    ws["A2"].font = Font(italic=True)
+
+    header_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+    success_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    error_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+
+    header_font = Font(bold=True)
+    center_align = Alignment(horizontal="center", vertical="center")
+    left_align = Alignment(horizontal="left", vertical="center")
+
+    thin_border = Border(
+        left=Side(style="thin"),
+        right=Side(style="thin"),
+        top=Side(style="thin"),
+        bottom=Side(style="thin"),
+    )
+
+    header_row = 4
+    data_row = 5
+
+    for cell in ws[header_row]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center_align
+        cell.border = thin_border
+
+    for row in ws.iter_rows(min_row=data_row, max_row=ws.max_row):
+        for cell in row:
+            cell.alignment = left_align
+            cell.border = thin_border
+
+    date_col = BATCH_COLUMNS.index("Date") + 1
+    gstin_col = BATCH_COLUMNS.index("GSTIN") + 1
+    status_col = BATCH_COLUMNS.index("Validation Status") + 1
+
+    for row_idx in range(data_row, ws.max_row + 1):
+        date_cell = ws.cell(row=row_idx, column=date_col)
+        if date_cell.value:
+            date_cell.number_format = "DD-MMM-YYYY"
+
+        gst_cell = ws.cell(row=row_idx, column=gstin_col)
+        status_cell = ws.cell(row=row_idx, column=status_col)
+
+        if gst_cell.value and not validate_gstin_checksum(str(gst_cell.value)):
+            gst_cell.fill = error_fill
+
+        if str(status_cell.value).strip().lower() == "success":
+            status_cell.fill = success_fill
+            status_cell.font = Font(bold=True)
+
+    for col_idx in range(1, ws.max_column + 1):
+        col_letter = ws.cell(row=header_row, column=col_idx).column_letter
+        max_length = 0
+        for row_idx in range(1, ws.max_row + 1):
+            value = ws.cell(row=row_idx, column=col_idx).value
+            if value is not None:
+                max_length = max(max_length, len(str(value)))
+        ws.column_dimensions[col_letter].width = max_length + 3
+
+    wb.save(output_path)
 
 
 def generate_tally_sales_xml(invoice_data: dict, output_path: str) -> str:

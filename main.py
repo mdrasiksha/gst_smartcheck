@@ -52,11 +52,22 @@ def process_invoices_bulk(invoice_jobs):
             else:
                 data, status = process_invoice(job["pdf_path"], output_path)
 
+            confidence = data.get("Confidence") if isinstance(data.get("Confidence"), dict) else {}
+            confidence_score = round((sum(confidence.values()) / len(confidence)) * 100, 2) if confidence else None
+
             results.append(
                 {
-                    "Invoice": name,
-                    "Status": status,
-                    "Final Amount": data.get("Final Amount"),
+                    "Source File Name": name,
+                    "Invoice No": data.get("Invoice Number"),
+                    "Date": data.get("Invoice Date"),
+                    "GSTIN": data.get("GST Number"),
+                    "Taxable Value": data.get("Taxable Amount"),
+                    "CGST": data.get("CGST Amount"),
+                    "SGST": data.get("SGST Amount"),
+                    "IGST": data.get("IGST Amount"),
+                    "Total": data.get("Final Amount"),
+                    "Validation Status": status,
+                    "Confidence Score": confidence_score,
                     "Rules Applied": ", ".join(data.get("_rules_applied", [])),
                     "Output File": output_path,
                 }
@@ -64,9 +75,17 @@ def process_invoices_bulk(invoice_jobs):
         except Exception as exc:
             results.append(
                 {
-                    "Invoice": name,
-                    "Status": "FAILED",
-                    "Final Amount": None,
+                    "Source File Name": name,
+                    "Invoice No": None,
+                    "Date": None,
+                    "GSTIN": None,
+                    "Taxable Value": None,
+                    "CGST": None,
+                    "SGST": None,
+                    "IGST": None,
+                    "Total": None,
+                    "Validation Status": "FAILED",
+                    "Confidence Score": None,
                     "Rules Applied": str(exc),
                     "Output File": None,
                 }

@@ -163,7 +163,7 @@ async def upload_bulk_invoices(
             for row in results:
                 output_file = row.get("Output File")
                 if output_file and os.path.exists(output_file):
-                    base = os.path.splitext(row["Invoice"])[0]
+                    base = os.path.splitext(row.get("Source File Name") or "invoice")[0]
                     zf.write(output_file, arcname=f"reports/{base}.xlsx")
 
         cleanup_old_files()
