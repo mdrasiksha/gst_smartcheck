@@ -142,12 +142,15 @@ if uploaded_zip:
             write_batch_summary(results, batch_output)
 
             with open(batch_output, "rb") as f:
-                st.download_button(
-                    label="⬇ Download Batch Summary (Excel)",
-                    data=f,
-                    file_name="batch_summary.xlsx",
-                    key="download_batch_summary"
-                )
+                batch_excel_bytes = f.read()
+
+            st.download_button(
+                label="⬇ Download Batch Summary (Excel)",
+                data=batch_excel_bytes,
+                file_name="batch_summary.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_batch_summary"
+            )
         else:
             st.warning("⚠️ No PDF invoices found inside the ZIP file.")
 
