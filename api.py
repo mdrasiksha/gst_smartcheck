@@ -6,7 +6,6 @@ import re
 import time
 import uuid
 import zipfile
-import tempfile
 
 from pypdf.errors import PdfReadError
 
@@ -112,22 +111,19 @@ async def upload_invoice(email: str = Form(...), file: UploadFile = File(...)):
     unique_id = str(uuid.uuid4())
     storage_file_name = f"{unique_id}.pdf"
     excel_file_name = ensure_xlsx_filename(f"{unique_id}.xlsx")
-    temp_excel_path = None
+    excel_output_path = os.path.join(OUTPUT_FOLDER, excel_file_name)
 
     try:
         # 1) Receive bytes -> 2) Extract
         storage_path = upload_invoice_pdf(storage_file_name, pdf_bytes)
         stored_pdf_bytes = download_invoice_pdf(storage_path)
 
-        # 3) Write Excel using tempfile for collision-free processing
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx", dir=OUTPUT_FOLDER) as tmp_excel:
-            temp_excel_path = ensure_xlsx_filename(tmp_excel.name)
-
-        data, status = process_invoice_bytes(stored_pdf_bytes, temp_excel_path)
+        # 3) Write Excel into outputs so it remains downloadable until cleanup
+        data, status = process_invoice_bytes(stored_pdf_bytes, excel_output_path)
 
         # 4) Upload to Supabase with upsert=True
         time.sleep(0.5)
-        with open(temp_excel_path, "rb") as excel_file:
+        with open(excel_output_path, "rb") as excel_file:
             excel_url = upload_to_supabase(excel_file_name, excel_file.read())
 
         # keep source invoice url for history traceability
@@ -161,9 +157,7 @@ async def upload_invoice(email: str = Form(...), file: UploadFile = File(...)):
             },
         }
     finally:
-        # 5) Cleanup local temp files
-        if temp_excel_path and os.path.exists(temp_excel_path):
-            os.remove(temp_excel_path)
+        # 5) Retain generated files for download; cleanup removes files older than 24h
         cleanup_old_files()
 
 
