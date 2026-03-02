@@ -76,12 +76,21 @@ document.getElementById("uploadForm").addEventListener("submit", async function(
         });
 
         if (response.ok) {
-            const remaining = response.headers.get("X-Remaining");
-            const blob = await response.blob();
+            const payload = await response.json();
+            const remaining = payload.remaining;
+
+            if (!payload.file_url) {
+                status.innerText = "❌ Conversion completed but download link is missing.";
+                return;
+            }
+
             const link = document.createElement("a");
-            link.href = window.URL.createObjectURL(blob);
+            link.href = payload.file_url;
             link.download = "invoice_output.xlsx";
+            link.target = "_blank";
+            link.rel = "noopener";
             link.click();
+
             status.innerText = `✅ Success! Free uploads remaining: ${remaining}`;
         } else {
             const errorData = await response.json();
