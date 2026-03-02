@@ -55,53 +55,8 @@
 
 </div>
 
-<script>
-document.getElementById("uploadForm").addEventListener("submit", async function(e){
-    e.preventDefault();
+<script src="./script.js"></script>
 
-    const status = document.getElementById("statusMessage");
-    status.innerText = "Processing...";
-
-    const email = document.getElementById("email").value;
-    const file = document.getElementById("invoiceFile").files[0];
-
-    const formData = new FormData();
-    formData.append("email", email);
-    formData.append("file", file);
-
-    try {
-        const response = await fetch("https://gst-smartcheck.onrender.com/upload", {
-            method: "POST",
-            body: formData
-        });
-
-        if (response.ok) {
-            const payload = await response.json();
-            const remaining = payload.remaining;
-
-            if (!payload.file_url) {
-                status.innerText = "❌ Conversion completed but download link is missing.";
-                return;
-            }
-
-            const link = document.createElement("a");
-            link.href = payload.file_url;
-            link.download = "invoice_output.xlsx";
-            link.target = "_blank";
-            link.rel = "noopener";
-            link.click();
-
-            status.innerText = `✅ Success! Free uploads remaining: ${remaining}`;
-        } else {
-            const errorData = await response.json();
-            status.innerText = `❌ ${errorData.error}`;
-        }
-
-    } catch (error) {
-        status.innerText = "❌ Backend not running.";
-    }
-});
-</script>
 
 </body>
 </html>

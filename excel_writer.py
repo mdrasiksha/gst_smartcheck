@@ -1,5 +1,6 @@
 import xml.etree.ElementTree as ET
 from datetime import datetime
+import os
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -125,6 +126,14 @@ def write_to_excel(data, status, output_path):
         ws.column_dimensions[col_letter].width = max_length + 3
 
     wb.save(output_path)
+    wb.close()
+
+    return bool(
+        output_path
+        and output_path.lower().endswith(".xlsx")
+        and os.path.exists(output_path)
+        and os.path.getsize(output_path) > 0
+    )
 
 
 def generate_tally_xml(data):
