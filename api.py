@@ -1,7 +1,6 @@
-from fastapi import FastAPI, UploadFile, File, Form, Query, Request
+from fastapi import FastAPI, UploadFile, File, Form, Query, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 import os
 import time
 import uuid
@@ -45,7 +44,15 @@ TALLY_FOLDER = "exports"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(TALLY_FOLDER, exist_ok=True)
 
-app.mount("/downloads", StaticFiles(directory=OUTPUT_FOLDER), name="downloads")
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def ensure_xlsx_filename(filename: str) -> str:
+    base, ext = os.path.splitext(filename or "")
+    if ext.lower() != ".xlsx":
+        return f"{base or 'invoice'}.xlsx"
+    return filename
+
 
 
 def cleanup_old_files():
@@ -95,6 +102,7 @@ async def upload_invoice(email: str = Form(...), file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     unique_id = str(uuid.uuid4())
     storage_file_name = f"{unique_id}.pdf"
+    excel_file_name = ensure_xlsx_filename(f"{unique_id}.xlsx")
     temp_excel_path = None
 
     try:
@@ -104,13 +112,14 @@ async def upload_invoice(email: str = Form(...), file: UploadFile = File(...)):
 
         # 3) Write Excel using tempfile for collision-free processing
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx", dir=OUTPUT_FOLDER) as tmp_excel:
-            temp_excel_path = tmp_excel.name
+            temp_excel_path = ensure_xlsx_filename(tmp_excel.name)
 
         data, status = process_invoice_bytes(stored_pdf_bytes, temp_excel_path)
 
         # 4) Upload to Supabase with upsert=True
+        time.sleep(0.5)
         with open(temp_excel_path, "rb") as excel_file:
-            excel_url = upload_to_supabase(f"{unique_id}.xlsx", excel_file.read())
+            excel_url = upload_to_supabase(excel_file_name, excel_file.read())
 
         # keep source invoice url for history traceability
         invoice_pdf_url = get_public_invoice_url(storage_path)
@@ -178,7 +187,7 @@ async def upload_bulk_invoices(
 
             file_id = f"{run_id}_{index}"
             safe_name = os.path.basename(upload_file.filename)
-            output_path = os.path.join(OUTPUT_FOLDER, f"{file_id}.xlsx")
+            output_path = os.path.join(OUTPUT_FOLDER, ensure_xlsx_filename(f"{file_id}.xlsx"))
 
             pdf_bytes = await upload_file.read()
             storage_path = upload_invoice_pdf(f"{file_id}.pdf", pdf_bytes)
@@ -197,7 +206,7 @@ async def upload_bulk_invoices(
         for _ in files:
             increment_usage(email)
 
-        summary_path = os.path.join(OUTPUT_FOLDER, f"{run_id}_batch_summary.xlsx")
+        summary_path = os.path.join(OUTPUT_FOLDER, ensure_xlsx_filename(f"{run_id}_batch_summary.xlsx"))
         write_batch_summary(results, summary_path)
 
         zip_path = os.path.join(OUTPUT_FOLDER, f"{run_id}_bulk_results.zip")
@@ -207,7 +216,7 @@ async def upload_bulk_invoices(
                 output_file = row.get("Output File")
                 if output_file and os.path.exists(output_file):
                     base = os.path.splitext(row.get("Source File Name") or "invoice")[0]
-                    zf.write(output_file, arcname=f"reports/{base}.xlsx")
+                    zf.write(output_file, arcname=f"reports/{ensure_xlsx_filename(base)}")
 
         cleanup_old_files()
 
@@ -221,6 +230,23 @@ async def upload_bulk_invoices(
 
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@app.get("/downloads/{filename}")
+async def download_excel(filename: str):
+    safe_name = os.path.basename(filename)
+    safe_name = ensure_xlsx_filename(safe_name)
+    file_path = os.path.join(OUTPUT_FOLDER, safe_name)
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    time.sleep(0.5)
+    return FileResponse(
+        path=file_path,
+        filename=safe_name,
+        media_type=XLSX_MEDIA_TYPE,
+    )
 
 
 @app.get("/test")
