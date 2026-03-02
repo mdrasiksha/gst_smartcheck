@@ -54,6 +54,15 @@ def get_usage(email):
     return row[0] if row else 0
 
 
+def get_user_stats(email):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM invoices WHERE email=?", (email,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
 def increment_usage(email):
     conn = _connect()
     cursor = conn.cursor()

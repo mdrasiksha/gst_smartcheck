@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import os
 import time
 import uuid
@@ -44,6 +45,8 @@ TALLY_FOLDER = "exports"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(TALLY_FOLDER, exist_ok=True)
 
+app.mount("/downloads", StaticFiles(directory=OUTPUT_FOLDER), name="downloads")
+
 
 def cleanup_old_files():
     now = time.time()
@@ -86,7 +89,7 @@ async def upload_invoice(email: str = Form(...), file: UploadFile = File(...)):
     if usage >= MAX_FREE:
         return JSONResponse(
             status_code=403,
-            content={"error": "Free limit reached. Please subscribe.", "remaining": 0},
+            content={"error": "Free limit reached. Join the Waitlist for Pro access.", "remaining": 0},
         )
 
     pdf_bytes = await file.read()
