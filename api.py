@@ -98,7 +98,11 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 @app.post("/upload")
-async def upload_invoice(email: str = Form(...), file: UploadFile = File(...)):
+async def upload_invoice(
+    email: str = Form(...),
+    file: UploadFile = File(...),
+    output_format: str = Form("xlsx"),
+):
     usage = get_usage(email)
 
     if usage >= MAX_FREE:
@@ -110,8 +114,11 @@ async def upload_invoice(email: str = Form(...), file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     unique_id = str(uuid.uuid4())
     storage_file_name = f"{unique_id}.pdf"
+    normalized_output_format = (output_format or "xlsx").strip().lower()
     excel_file_name = ensure_xlsx_filename(f"{unique_id}.xlsx")
     excel_output_path = os.path.join(OUTPUT_FOLDER, excel_file_name)
+    xml_file_name = f"{unique_id}.xml"
+    xml_output_path = os.path.join(TALLY_FOLDER, xml_file_name)
 
     try:
         # 1) Receive bytes -> 2) Extract
@@ -121,10 +128,25 @@ async def upload_invoice(email: str = Form(...), file: UploadFile = File(...)):
         # 3) Write Excel into outputs so it remains downloadable until cleanup
         data, status = process_invoice_bytes(stored_pdf_bytes, excel_output_path)
 
-        # 4) Upload to Supabase with upsert=True
+        # 4) Upload the selected output format to Supabase with upsert=True
         time.sleep(0.5)
-        with open(excel_output_path, "rb") as excel_file:
-            excel_url = upload_to_supabase(excel_file_name, excel_file.read())
+        if normalized_output_format == "xml":
+            xml_data = {
+                "Date": data.get("Invoice Date") or "",
+                "GSTIN": data.get("Vendor GSTIN") or "",
+                "Total": data.get("Final Amount") or 0,
+                "Tax": (
+                    (data.get("CGST Amount") or 0)
+                    + (data.get("SGST Amount") or 0)
+                    + (data.get("IGST Amount") or 0)
+                ),
+            }
+            generate_tally_sales_xml(xml_data, xml_output_path)
+            with open(xml_output_path, "rb") as xml_file:
+                output_file_url = upload_to_supabase(xml_file_name, xml_file.read())
+        else:
+            with open(excel_output_path, "rb") as excel_file:
+                output_file_url = upload_to_supabase(excel_file_name, excel_file.read())
 
         # keep source invoice url for history traceability
         invoice_pdf_url = get_public_invoice_url(storage_path)
@@ -145,7 +167,7 @@ async def upload_invoice(email: str = Form(...), file: UploadFile = File(...)):
             "remaining": remaining,
             "usage_count": usage_count,
             "can_download_xml": usage_count <= MAX_FREE,
-            "file_url": excel_url,
+            "file_url": output_file_url,
             "data_summary": {
                 "invoice_no": data.get("Invoice Number"),
                 "date": data.get("Invoice Date"),
