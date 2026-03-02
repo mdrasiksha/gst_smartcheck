@@ -133,6 +133,18 @@ def get_invoice_history(email, limit=10):
     cursor = conn.cursor()
     cursor.execute(
         """
+        SELECT id
+        FROM invoices
+        WHERE email = ?
+        ORDER BY datetime(created_at) ASC, id ASC
+        LIMIT 10
+        """,
+        (email,),
+    )
+    first_ten_ids = {row["id"] for row in cursor.fetchall()}
+
+    cursor.execute(
+        """
         SELECT id, created_at, invoice_no, invoice_date, total_amount, gst_amount, file_url, status
         FROM invoices
         WHERE email = ?
@@ -141,7 +153,11 @@ def get_invoice_history(email, limit=10):
         """,
         (email, limit),
     )
-    rows = [dict(row) for row in cursor.fetchall()]
+    rows = []
+    for row in cursor.fetchall():
+        row_data = dict(row)
+        row_data["can_download_xml"] = row_data.get("id") in first_ten_ids
+        rows.append(row_data)
     conn.close()
     return rows
 

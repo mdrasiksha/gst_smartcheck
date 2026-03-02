@@ -125,8 +125,10 @@ def write_to_excel(data, status, output_path):
                 max_length = max(max_length, len(str(cell_value)))
         ws.column_dimensions[col_letter].width = max_length + 3
 
-    wb.save(output_path)
-    wb.close()
+    try:
+        wb.save(output_path)
+    finally:
+        wb.close()
 
     return bool(
         output_path

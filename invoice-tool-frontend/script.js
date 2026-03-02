@@ -25,6 +25,7 @@ document.getElementById("uploadForm").addEventListener("submit", async function 
 
         const payload = await response.json();
         const remaining = payload.remaining;
+        const usageCount = payload.usage_count ?? 0;
 
         if (!payload.file_url) {
             status.innerText = "❌ Conversion completed but download link is missing.";
@@ -32,6 +33,12 @@ document.getElementById("uploadForm").addEventListener("submit", async function 
         }
 
         window.location.assign(payload.file_url);
+
+        if (usageCount > 10) {
+            status.innerText = "⚠️ Pro required for additional downloads.";
+            return;
+        }
+
         status.innerText = `✅ Success! Free uploads remaining: ${remaining}`;
     } catch (error) {
         status.innerText = "❌ Backend not running.";

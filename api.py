@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, Query, Request, HTTPExcepti
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
+import re
 import time
 import uuid
 import zipfile
@@ -52,6 +53,14 @@ def ensure_xlsx_filename(filename: str) -> str:
     if ext.lower() != ".xlsx":
         return f"{base or 'invoice'}.xlsx"
     return filename
+
+
+def sanitize_download_filename(filename: str, default_stem: str = "invoice") -> str:
+    safe_name = os.path.basename(filename or "")
+    stem, ext = os.path.splitext(safe_name)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-") or default_stem
+    ext = re.sub(r"[^A-Za-z0-9.]", "", ext)
+    return f"{stem}{ext}"
 
 
 
@@ -126,7 +135,8 @@ async def upload_invoice(email: str = Form(...), file: UploadFile = File(...)):
         save_invoice_metadata(email, data, invoice_pdf_url, status)
 
         increment_usage(email)
-        remaining = MAX_FREE - get_usage(email)
+        usage_count = get_usage(email)
+        remaining = MAX_FREE - usage_count
 
         gst_total = (
             (data.get("CGST Amount") or 0)
@@ -137,6 +147,8 @@ async def upload_invoice(email: str = Form(...), file: UploadFile = File(...)):
         return {
             "success": True,
             "remaining": remaining,
+            "usage_count": usage_count,
+            "can_download_xml": usage_count <= MAX_FREE,
             "file_url": excel_url,
             "data_summary": {
                 "invoice_no": data.get("Invoice Number"),
@@ -241,11 +253,13 @@ async def download_excel(filename: str):
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
 
+    download_filename = sanitize_download_filename(safe_name, default_stem="invoice")
     time.sleep(0.5)
     return FileResponse(
         path=file_path,
-        filename=safe_name,
+        filename=download_filename,
         media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{download_filename}"'},
     )
 
 
@@ -257,7 +271,12 @@ def test():
 @app.get("/history")
 async def fetch_history(email: str = Query(...), limit: int = Query(10, ge=1, le=25)):
     history = get_invoice_history(email, limit=limit)
-    return {"history": history}
+    usage_count = get_usage(email)
+    return {
+        "history": history,
+        "usage_count": usage_count,
+        "can_download_xml": usage_count <= MAX_FREE,
+    }
 
 
 @app.get("/export/tally")
@@ -276,10 +295,15 @@ async def export_tally(invoice_id: str = Query(...)):
     xml_path = os.path.join(TALLY_FOLDER, f"tally_{invoice_id}.xml")
     generate_tally_sales_xml(xml_data, xml_path)
 
+    xml_filename = sanitize_download_filename(
+        f"tally_{row.get('invoice_no') or invoice_id}.xml",
+        default_stem=f"tally_{invoice_id}",
+    )
     return FileResponse(
         path=xml_path,
-        filename=f"tally_{row.get('invoice_no') or invoice_id}.xml",
+        filename=xml_filename,
         media_type="application/xml",
+        headers={"Content-Disposition": f'attachment; filename="{xml_filename}"'},
     )
 
 
