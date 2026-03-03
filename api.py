@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form, Query, Request, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
@@ -9,7 +9,7 @@ import zipfile
 
 from pypdf.errors import PdfReadError
 
-from batch_excel_writer import write_batch_summary, generate_tally_sales_xml
+from batch_excel_writer import write_batch_summary
 from database import (
     init_db,
     get_usage,
@@ -24,6 +24,7 @@ from database import (
 )
 from main import process_invoice_bytes, process_invoices_bulk
 from ocr import OCREngineError, PDFExtractionError
+from tally_writer import build_tally_voucher_xml
 
 app = FastAPI()
 
@@ -39,10 +40,7 @@ init_db()
 
 OUTPUT_FOLDER = "outputs"
 MAX_FREE = 10
-TALLY_FOLDER = "exports"
-
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-os.makedirs(TALLY_FOLDER, exist_ok=True)
 
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -118,7 +116,6 @@ async def upload_invoice(
     excel_file_name = ensure_xlsx_filename(f"{unique_id}.xlsx")
     excel_output_path = os.path.join(OUTPUT_FOLDER, excel_file_name)
     xml_file_name = f"{unique_id}.xml"
-    xml_output_path = os.path.join(TALLY_FOLDER, xml_file_name)
 
     try:
         # 1) Receive bytes -> 2) Extract
@@ -128,23 +125,10 @@ async def upload_invoice(
         # 3) Write Excel into outputs so it remains downloadable until cleanup
         data, status = process_invoice_bytes(stored_pdf_bytes, excel_output_path)
 
-        # 4) Upload the selected output format to Supabase with upsert=True
+        # 4) Upload XLSX output to Supabase only when requested.
         time.sleep(0.5)
-        if normalized_output_format == "xml":
-            xml_data = {
-                "Date": data.get("Invoice Date") or "",
-                "GSTIN": data.get("Vendor GSTIN") or "",
-                "Total": data.get("Final Amount") or 0,
-                "Tax": (
-                    (data.get("CGST Amount") or 0)
-                    + (data.get("SGST Amount") or 0)
-                    + (data.get("IGST Amount") or 0)
-                ),
-            }
-            generate_tally_sales_xml(xml_data, xml_output_path)
-            with open(xml_output_path, "rb") as xml_file:
-                output_file_url = upload_to_supabase(xml_file_name, xml_file.read())
-        else:
+        output_file_url = None
+        if normalized_output_format != "xml":
             with open(excel_output_path, "rb") as excel_file:
                 output_file_url = upload_to_supabase(excel_file_name, excel_file.read())
 
@@ -161,6 +145,14 @@ async def upload_invoice(
             + (data.get("SGST Amount") or 0)
             + (data.get("IGST Amount") or 0)
         )
+
+        if normalized_output_format == "xml":
+            xml_payload = build_tally_voucher_xml(data)
+            return Response(
+                content=xml_payload,
+                media_type="application/xml",
+                headers={"Content-Disposition": f'attachment; filename="{xml_file_name}"'},
+            )
 
         return {
             "success": True,
