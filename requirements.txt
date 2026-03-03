@@ -10,7 +10,6 @@ fastapi
 uvicorn
 python-multipart
 openpyxl
-pandas
 pypdf
 pdfplumber
 pypdf2

@@ -50,7 +50,7 @@ def _extract_text_with_ocr(pdf_input: PdfInput) -> str:
 
     ocr_pages = []
     for image in images:
-        text = pytesseract.image_to_string(image)
+        text = pytesseract.image_to_string(image, config="--psm 6")
         if text and text.strip():
             ocr_pages.append(text)
 
