@@ -4,7 +4,7 @@ from threading import Lock
 
 PAID_USERS = [
     "pro@example.com",
-    "finance@company.com",
+    "finance@company.com", "mototest2022@gmail.com"
 ]
 
 _FREE_UPLOADS_FILE = os.path.join(os.path.dirname(__file__), "free_uploads.json")
