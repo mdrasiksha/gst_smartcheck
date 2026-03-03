@@ -1,5 +1,8 @@
+import json
+import os
 import re
 from typing import Dict
+from urllib import error, request
 
 GSTIN_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -147,7 +150,7 @@ def run_validation_engine(text: str, data: Dict) -> Dict:
     return validated
 
 
-def extract_invoice_fields(text: str) -> dict:
+def _extract_invoice_fields_regex(text: str) -> dict:
     applied_rules = []
     text = normalize_text(text)
     print("\n================ DEBUG TEXT START ================\n")
@@ -915,3 +918,114 @@ def extract_invoice_fields(text: str) -> dict:
 
 
 
+
+
+def _coerce_float(value):
+    if value in (None, "", "null"):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.replace(",", "").strip()
+        cleaned = re.sub(r"[^\d.-]", "", cleaned)
+        if cleaned:
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
+    return None
+
+
+def _extract_json_object(payload: str) -> Dict:
+    if not payload:
+        return {}
+
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", payload, flags=re.DOTALL | re.IGNORECASE)
+    candidate = fenced.group(1) if fenced else payload
+
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return {}
+
+    try:
+        return json.loads(candidate[start : end + 1])
+    except json.JSONDecodeError:
+        return {}
+
+
+def _extract_with_gemini(text: str) -> Dict:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return {}
+
+    model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+
+    prompt = (
+        "Extract GST invoice fields from OCR text and return only a single JSON object. "
+        "Use null for missing values. Follow exactly this schema: "
+        "Invoice Number, Invoice Date, GST Number, Taxable Amount, CGST Amount, SGST Amount, IGST Amount, Final Amount. "
+        "Important: specifically detect parts/part and labour/labor sections; sum their taxable values into Taxable Amount. "
+        "Do not add commentary.\n\nOCR TEXT:\n" + text
+    )
+
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+    }
+
+    req = request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with request.urlopen(req, timeout=20) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+    except (error.URLError, TimeoutError, json.JSONDecodeError):
+        return {}
+
+    candidates = raw.get("candidates") or []
+    if not candidates:
+        return {}
+
+    parts = (((candidates[0] or {}).get("content") or {}).get("parts")) or []
+    content = "\n".join(str(p.get("text", "")) for p in parts if isinstance(p, dict))
+    parsed = _extract_json_object(content)
+    if not parsed:
+        return {}
+
+    normalized = {
+        "Invoice Number": parsed.get("Invoice Number"),
+        "Invoice Date": parsed.get("Invoice Date"),
+        "GST Number": parsed.get("GST Number"),
+        "Taxable Amount": _coerce_float(parsed.get("Taxable Amount")),
+        "Sub Total": _coerce_float(parsed.get("Taxable Amount")),
+        "CGST Amount": _coerce_float(parsed.get("CGST Amount")) or 0.0,
+        "SGST Amount": _coerce_float(parsed.get("SGST Amount")) or 0.0,
+        "IGST Amount": _coerce_float(parsed.get("IGST Amount")) or 0.0,
+        "Final Amount": _coerce_float(parsed.get("Final Amount")),
+        "Is GST Invoice": bool(parsed.get("GST Number")),
+        "Confidence": {
+            "Invoice Number": 0.85 if parsed.get("Invoice Number") else 0.4,
+            "Invoice Date": 0.85 if parsed.get("Invoice Date") else 0.4,
+            "GST Number": 0.9 if parsed.get("GST Number") else 0.4,
+            "Taxable Amount": 0.85 if _coerce_float(parsed.get("Taxable Amount")) is not None else 0.4,
+            "CGST Amount": 0.85 if _coerce_float(parsed.get("CGST Amount")) is not None else 0.4,
+            "SGST Amount": 0.85 if _coerce_float(parsed.get("SGST Amount")) is not None else 0.4,
+            "IGST Amount": 0.85 if _coerce_float(parsed.get("IGST Amount")) is not None else 0.4,
+            "Final Amount": 0.85 if _coerce_float(parsed.get("Final Amount")) is not None else 0.4,
+        },
+        "_rules_applied": ["AI_GEMINI_EXTRACTION"],
+    }
+    return normalized
+
+
+def extract_invoice_fields(text: str) -> dict:
+    ai_data = _extract_with_gemini(text)
+    if ai_data:
+        return run_validation_engine(normalize_text(text), ai_data)
+    return _extract_invoice_fields_regex(text)
