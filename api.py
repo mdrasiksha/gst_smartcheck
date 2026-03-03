@@ -10,6 +10,11 @@ import zipfile
 from pypdf.errors import PdfReadError
 
 from batch_excel_writer import write_batch_summary
+from access_manager import (
+    get_free_upload_count,
+    increment_free_upload_count,
+    is_pro_user,
+)
 from database import (
     init_db,
     get_usage,
@@ -101,18 +106,26 @@ async def upload_invoice(
     file: UploadFile = File(...),
     output_format: str = Form("xlsx"),
 ):
-    usage = get_usage(email)
+    normalized_output_format = (output_format or "xlsx").strip().lower()
+    pro_user = is_pro_user(email)
 
-    if usage >= MAX_FREE:
+    usage = 0 if pro_user else get_free_upload_count(email)
+
+    if not pro_user and usage >= MAX_FREE:
         return JSONResponse(
             status_code=403,
             content={"error": "Free limit reached. Join the Waitlist for Pro access.", "remaining": 0},
         )
 
+    if normalized_output_format == "xml" and not pro_user:
+        return JSONResponse(
+            status_code=403,
+            content={"error": "XML requires Pro"},
+        )
+
     pdf_bytes = await file.read()
     unique_id = str(uuid.uuid4())
     storage_file_name = f"{unique_id}.pdf"
-    normalized_output_format = (output_format or "xlsx").strip().lower()
     excel_file_name = ensure_xlsx_filename(f"{unique_id}.xlsx")
     excel_output_path = os.path.join(OUTPUT_FOLDER, excel_file_name)
     xml_file_name = f"{unique_id}.xml"
@@ -136,9 +149,13 @@ async def upload_invoice(
         invoice_pdf_url = get_public_invoice_url(storage_path)
         save_invoice_metadata(email, data, invoice_pdf_url, status)
 
-        increment_usage(email)
-        usage_count = get_usage(email)
-        remaining = MAX_FREE - usage_count
+        if pro_user:
+            increment_usage(email)
+            usage_count = usage
+            remaining = None
+        else:
+            usage_count = increment_free_upload_count(email)
+            remaining = max(0, MAX_FREE - usage_count)
 
         gst_total = (
             (data.get("CGST Amount") or 0)
@@ -158,7 +175,8 @@ async def upload_invoice(
             "success": True,
             "remaining": remaining,
             "usage_count": usage_count,
-            "can_download_xml": usage_count <= MAX_FREE,
+            "can_download_xml": pro_user,
+            "is_pro": pro_user,
             "file_url": output_file_url,
             "data_summary": {
                 "invoice_no": data.get("Invoice Number"),
