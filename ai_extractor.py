@@ -77,20 +77,130 @@ def _is_close(left: float, right: float, tolerance: float = 1.5) -> bool:
     return abs((left or 0.0) - (right or 0.0)) <= tolerance
 
 
+_NUMBER_WORDS = {
+    "ZERO": 0,
+    "ONE": 1,
+    "TWO": 2,
+    "THREE": 3,
+    "FOUR": 4,
+    "FIVE": 5,
+    "SIX": 6,
+    "SEVEN": 7,
+    "EIGHT": 8,
+    "NINE": 9,
+    "TEN": 10,
+    "ELEVEN": 11,
+    "TWELVE": 12,
+    "THIRTEEN": 13,
+    "FOURTEEN": 14,
+    "FIFTEEN": 15,
+    "SIXTEEN": 16,
+    "SEVENTEEN": 17,
+    "EIGHTEEN": 18,
+    "NINETEEN": 19,
+    "TWENTY": 20,
+    "THIRTY": 30,
+    "FORTY": 40,
+    "FIFTY": 50,
+    "SIXTY": 60,
+    "SEVENTY": 70,
+    "EIGHTY": 80,
+    "NINETY": 90,
+}
+
+
+def _words_to_number(words: str) -> float | None:
+    if not words:
+        return None
+
+    normalized = re.sub(r"[^A-Z\s-]", " ", words.upper()).replace("-", " ")
+    tokens = [tok for tok in normalized.split() if tok not in {"RUPEES", "RUPEE", "ONLY", "AND", "PAISE", "PAISA"}]
+    if not tokens:
+        return None
+
+    total = 0
+    current = 0
+    parsed_any = False
+
+    for token in tokens:
+        if token in _NUMBER_WORDS:
+            current += _NUMBER_WORDS[token]
+            parsed_any = True
+        elif token == "HUNDRED":
+            current = (current or 1) * 100
+            parsed_any = True
+        elif token == "THOUSAND":
+            total += (current or 1) * 1000
+            current = 0
+            parsed_any = True
+        elif token == "LAKH":
+            total += (current or 1) * 100000
+            current = 0
+            parsed_any = True
+        elif token == "CRORE":
+            total += (current or 1) * 10000000
+            current = 0
+            parsed_any = True
+
+    if not parsed_any:
+        return None
+
+    return float(total + current)
+
+
+def _extract_amount_chargeable_in_words(text: str) -> float | None:
+    for i, line in enumerate(text.split("\n")):
+        if "AMOUNT CHARGEABLE (IN WORDS)" in line:
+            candidates = [line]
+            if i + 1 < len(text.split("\n")):
+                candidates.append(text.split("\n")[i + 1])
+            for candidate in candidates:
+                parsed = _words_to_number(candidate)
+                if parsed is not None:
+                    return round(parsed, 2)
+    return None
+
+
+def _extract_summary_totals(text: str) -> tuple[float | None, float | None]:
+    table_anchor = re.search(r"HSN/SAC\s+TAXABLE\s+VALUE[\s\S]{0,1200}?\bTOTAL\b", text)
+    if not table_anchor:
+        return None, None
+
+    segment = text[table_anchor.start(): table_anchor.end() + 200]
+    total_row = re.search(r"\bTOTAL\b\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)", segment)
+    if not total_row:
+        return None, None
+
+    taxable = float(total_row.group(1).replace(",", ""))
+    total_tax = float(total_row.group(2).replace(",", ""))
+    return taxable, total_tax
+
+
+def _line_total_candidates(line: str) -> list[float]:
+    amounts = []
+    for match in re.finditer(r"\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{1,2}|\d+", line):
+        suffix = line[match.end(): match.end() + 8].strip().upper()
+        if suffix.startswith("NOS") or suffix.startswith("UNITS"):
+            continue
+        amounts.append(float(match.group().replace(",", "")))
+    return amounts
+
+
 def _validate_tax_math(data: Dict) -> tuple[bool, float]:
     taxable = float(data.get("Taxable Amount") or 0)
     cgst = float(data.get("CGST Amount") or 0)
     sgst = float(data.get("SGST Amount") or 0)
     igst = float(data.get("IGST Amount") or 0)
+    total_tax = data.get("Total Tax Amount")
     final_amount = data.get("Final Amount")
 
     if final_amount is None:
         return False, 0.0
 
-    tax_value = igst if igst > 0 else (cgst + sgst)
+    tax_value = float(total_tax) if total_tax is not None else (igst if igst > 0 else (cgst + sgst))
     expected = round(taxable + tax_value, 2)
     actual = float(final_amount)
-    return _is_close(expected, actual), expected
+    return abs(expected - actual) <= 0.01, expected
 
 
 def _retry_with_aggressive_patterns(text: str, data: Dict) -> Dict:
@@ -173,6 +283,21 @@ def _extract_invoice_fields_regex(text: str) -> dict:
 
     lines = text.split("\n")
     final = None  # single source of truth
+
+    words_total = _extract_amount_chargeable_in_words(text)
+    if words_total is not None:
+        data["Amount Chargeable (in words) Parsed"] = words_total
+        data["Confidence"]["Amount Chargeable (in words) Parsed"] = 0.98
+        applied_rules.append("TOTAL_FROM_WORDS")
+
+    summary_taxable, summary_total_tax = _extract_summary_totals(text)
+    if summary_taxable is not None and summary_total_tax is not None:
+        data["Taxable Amount"] = summary_taxable
+        data["Sub Total"] = summary_taxable
+        data["Total Tax Amount"] = summary_total_tax
+        data["Confidence"]["Taxable Amount"] = 0.98
+        data["Confidence"]["Total Tax Amount"] = 0.98
+        applied_rules.append("SUMMARY_TABLE_TOTAL_ROW")
 
     # =========================================================
     # HSN / SAC CODE EXTRACTION (NON-DESTRUCTIVE)
@@ -479,7 +604,7 @@ def _extract_invoice_fields_regex(text: str) -> dict:
     # =========================================================
     for line in lines:
         if re.search(r"\b(GRAND TOTAL|TOTAL AMOUNT|TOTAL INVOICE VALUE|AMOUNT PAYABLE|NET PAYABLE|BALANCE AMOUNT|TOTAL)\b", line):
-            nums = re.findall(r"\b\d+\.\d{1,2}\b|\b\d+\b", line)
+            nums = _line_total_candidates(line)
             if nums:
                 final = nums[-1]
                 break
@@ -490,12 +615,12 @@ def _extract_invoice_fields_regex(text: str) -> dict:
     if not final:
         for i, line in enumerate(lines):
             if "GRAND TOTAL" in line:
-                nums = re.findall(r"\b\d+\.\d{1,2}\b|\b\d+\b", line)
+                nums = _line_total_candidates(line)
                 if nums:
                     final = nums[-1]
                     break
                 elif i + 1 < len(lines):
-                    next_nums = re.findall(r"\b\d+\.\d{1,2}\b|\b\d+\b", lines[i + 1])
+                    next_nums = _line_total_candidates(lines[i + 1])
                     if next_nums:
                         final = next_nums[-1]
                         break
@@ -539,6 +664,12 @@ def _extract_invoice_fields_regex(text: str) -> dict:
 
         except:
             pass
+
+    if words_total is not None:
+        if data.get("Final Amount") is None or not _is_close(data.get("Final Amount", 0.0), words_total, tolerance=0.01):
+            data["Final Amount"] = words_total
+            data["Confidence"]["Final Amount"] = 0.98
+            applied_rules.append("FINAL_OVERRIDDEN_BY_WORDS")
 
     # =========================================================
     # OCR CONCAT GUARD (87338.14 KILLER)
@@ -910,6 +1041,16 @@ def _extract_invoice_fields_regex(text: str) -> dict:
             data["SGST Amount"] = gst_vals[-1]
             data["Confidence"]["CGST Amount"] = 0.95
             data["Confidence"]["SGST Amount"] = 0.95
+
+    if data.get("Total Tax Amount") is not None:
+        total_tax = float(data["Total Tax Amount"])
+        split_tax = float(data.get("CGST Amount", 0)) + float(data.get("SGST Amount", 0)) + float(data.get("IGST Amount", 0))
+        if abs(split_tax - total_tax) > 0.01:
+            data["CGST Amount"] = 0.0
+            data["SGST Amount"] = 0.0
+            data["IGST Amount"] = total_tax
+            data["Confidence"]["IGST Amount"] = 0.90
+            applied_rules.append("IGST_FROM_SUMMARY_TOTAL_TAX")
 
     data["_rules_applied"] = applied_rules
 
