@@ -87,21 +87,96 @@ def _validate_tax_math(data: Dict) -> tuple[bool, float]:
     if final_amount is None:
         return False, 0.0
 
-    tax_value = igst if igst > 0 else (cgst + sgst)
-    expected = round(taxable + tax_value, 2)
+    expected = round(taxable + cgst + sgst + igst, 2)
     actual = float(final_amount)
     return _is_close(expected, actual), expected
+
+
+def _extract_decimal_amounts(text: str) -> list[float]:
+    amounts: list[float] = []
+    for m in re.findall(r"\b\d{1,3}(?:,\d{3})*\.\d{2}\b|\b\d+\.\d{2}\b", text):
+        try:
+            amounts.append(float(m.replace(",", "")))
+        except ValueError:
+            continue
+    return amounts
+
+
+def _find_amount_by_anchors(lines: list[str], anchors: tuple[str, ...]) -> list[float]:
+    matches: list[float] = []
+    for i, line in enumerate(lines):
+        if not any(anchor in line for anchor in anchors):
+            continue
+        target_lines = [line]
+        if i + 1 < len(lines):
+            target_lines.append(lines[i + 1])
+        for candidate_line in target_lines:
+            for raw in re.findall(r"\b\d{1,3}(?:,\d{3})*\.\d{2}\b|\b\d+\.\d{2}\b", candidate_line):
+                matches.append(float(raw.replace(",", "")))
+    return matches
+
+
+def _reconcile_taxable_total(text: str, data: Dict) -> Dict:
+    reconciled = dict(data)
+    confidence = reconciled.setdefault("Confidence", {})
+    lines = text.split("\n")
+
+    total_anchors = ("GRAND TOTAL", "INVOICE VALUE", "TOTAL AMOUNT", "AMOUNT PAYABLE", "NET PAYABLE")
+    taxable_anchors = ("TAXABLE VALUE", "TAXABLE AMOUNT", "SUB TOTAL", "SUBTOTAL", "BASIC AMOUNT")
+
+    taxes = round(
+        float(reconciled.get("CGST Amount") or 0)
+        + float(reconciled.get("SGST Amount") or 0)
+        + float(reconciled.get("IGST Amount") or 0),
+        2,
+    )
+
+    total_candidates = _find_amount_by_anchors(lines, total_anchors)
+    taxable_candidates = _find_amount_by_anchors(lines, taxable_anchors)
+    decimal_candidates = _extract_decimal_amounts(text)
+
+    if not reconciled.get("Final Amount") and total_candidates:
+        reconciled["Final Amount"] = total_candidates[-1]
+        confidence["Final Amount"] = max(confidence.get("Final Amount", 0.0), 0.95)
+
+    if not reconciled.get("Taxable Amount") and taxable_candidates:
+        reconciled["Taxable Amount"] = taxable_candidates[-1]
+        reconciled["Sub Total"] = taxable_candidates[-1]
+        confidence["Taxable Amount"] = max(confidence.get("Taxable Amount", 0.0), 0.95)
+
+    # If math fails, prefer the discovered Total and back-calculate Taxable Amount.
+    final_amount = reconciled.get("Final Amount")
+    if final_amount not in (None, 0):
+        total_value = float(final_amount)
+        if taxes > 0:
+            expected_taxable = round(total_value - taxes, 2)
+            if expected_taxable >= 0 and not _is_close(float(reconciled.get("Taxable Amount") or 0), expected_taxable):
+                reconciled["Taxable Amount"] = expected_taxable
+                reconciled["Sub Total"] = expected_taxable
+                confidence["Taxable Amount"] = max(confidence.get("Taxable Amount", 0.0), 0.9)
+
+    # If still mismatched, try to find better Total by equation match.
+    is_valid, _ = _validate_tax_math(reconciled)
+    if not is_valid and reconciled.get("Taxable Amount") not in (None, 0):
+        expected_total = round(float(reconciled["Taxable Amount"]) + taxes, 2)
+        for candidate in total_candidates + decimal_candidates:
+            if _is_close(candidate, expected_total):
+                reconciled["Final Amount"] = candidate
+                confidence["Final Amount"] = max(confidence.get("Final Amount", 0.0), 0.9)
+                break
+
+    return reconciled
 
 
 def _retry_with_aggressive_patterns(text: str, data: Dict) -> Dict:
     retry_data = dict(data)
 
     total_patterns = [
-        r"(?:TOTAL\s*AMOUNT|GRAND\s*TOTAL|AMOUNT\s*PAYABLE|NET\s*PAYABLE)[^\d]{0,25}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)",
-        r"\bTOTAL\b[^\d]{0,15}(\d{3,}(?:\.\d{1,2})?)",
+        r"(?:TOTAL\s*AMOUNT|GRAND\s*TOTAL|INVOICE\s*VALUE|AMOUNT\s*PAYABLE|NET\s*PAYABLE)[^\d]{0,25}(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})",
+        r"\bTOTAL\b[^\d]{0,15}(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})",
     ]
     taxable_patterns = [
-        r"(?:TAXABLE\s*VALUE|TAXABLE\s*AMOUNT|SUB\s*TOTAL|BASIC\s*AMOUNT)[^\d]{0,20}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)",
+        r"(?:TAXABLE\s*VALUE|TAXABLE\s*AMOUNT|SUB\s*TOTAL|BASIC\s*AMOUNT)[^\d]{0,20}(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})",
     ]
 
     if retry_data.get("Final Amount") in (None, 0):
@@ -132,9 +207,11 @@ def run_validation_engine(text: str, data: Dict) -> Dict:
     for key in ("Taxable Amount", "CGST Amount", "SGST Amount", "IGST Amount", "Final Amount"):
         validated["Confidence"].setdefault(key, 0.4 if validated.get(key) is None else 0.7)
 
+    validated = _reconcile_taxable_total(text, validated)
     is_valid, expected = _validate_tax_math(validated)
     if not is_valid:
         validated = _retry_with_aggressive_patterns(text, validated)
+        validated = _reconcile_taxable_total(text, validated)
         is_valid, expected = _validate_tax_math(validated)
 
     validated["Validation"] = "Verified" if is_valid else "Math Mismatch"
@@ -270,11 +347,11 @@ def _extract_invoice_fields_regex(text: str) -> dict:
     # TAXABLE / SUBTOTAL – KEYWORD
     # =========================================================
     subtotal = re.search(
-        r"(SUBTOTAL|SUB TOTAL|TAXABLE VALUE|TAXABLE AMOUNT|BASIC AMOUNT)[^\d]{0,40}(\d+(\.\d{1,2})?)",
+        r"(SUBTOTAL|SUB TOTAL|TAXABLE VALUE|TAXABLE AMOUNT|BASIC AMOUNT)[^\d]{0,40}(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})",
         text,
     )
     if subtotal:
-        val = float(subtotal.group(2))
+        val = float(subtotal.group(2).replace(",", ""))
         data["Taxable Amount"] = val
         data["Sub Total"] = val
         data["Confidence"]["Taxable Amount"] = 0.95
@@ -479,7 +556,7 @@ def _extract_invoice_fields_regex(text: str) -> dict:
     # =========================================================
     for line in lines:
         if re.search(r"\b(GRAND TOTAL|TOTAL AMOUNT|TOTAL INVOICE VALUE|AMOUNT PAYABLE|NET PAYABLE|BALANCE AMOUNT|TOTAL)\b", line):
-            nums = re.findall(r"\b\d+\.\d{1,2}\b|\b\d+\b", line)
+            nums = re.findall(r"\b\d{1,3}(?:,\d{3})*\.\d{2}\b|\b\d+\.\d{2}\b", line)
             if nums:
                 final = nums[-1]
                 break
@@ -490,12 +567,12 @@ def _extract_invoice_fields_regex(text: str) -> dict:
     if not final:
         for i, line in enumerate(lines):
             if "GRAND TOTAL" in line:
-                nums = re.findall(r"\b\d+\.\d{1,2}\b|\b\d+\b", line)
+                nums = re.findall(r"\b\d{1,3}(?:,\d{3})*\.\d{2}\b|\b\d+\.\d{2}\b", line)
                 if nums:
                     final = nums[-1]
                     break
                 elif i + 1 < len(lines):
-                    next_nums = re.findall(r"\b\d+\.\d{1,2}\b|\b\d+\b", lines[i + 1])
+                    next_nums = re.findall(r"\b\d{1,3}(?:,\d{3})*\.\d{2}\b|\b\d+\.\d{2}\b", lines[i + 1])
                     if next_nums:
                         final = next_nums[-1]
                         break
@@ -518,7 +595,7 @@ def _extract_invoice_fields_regex(text: str) -> dict:
     # FALLBACK – LAST LARGE NUMBER (NO PIN CODES)
     # =========================================================
     if not final:
-        candidates = re.findall(r"\b\d{3,}\.\d{1,2}\b|\b\d{3,}\b", text)
+        candidates = re.findall(r"\b\d{1,3}(?:,\d{3})*\.\d{2}\b|\b\d+\.\d{2}\b", text)
 
         clean_candidates = []
         for c in candidates:
