@@ -51,7 +51,7 @@ def _normalize_date(value):
     return parsed.strftime("%Y-%m-%d")
 
 
-def _prepare_row(data, status):
+def _prepare_row(data, status, source_file_name=None):
     row = {
         "Invoice No": _first_available(data, ["Invoice Number", "Invoice No"]),
         "Date": _normalize_date(_first_available(data, ["Invoice Date", "Date"])),
@@ -64,7 +64,7 @@ def _prepare_row(data, status):
         "Validation": data.get("Validation", "Math Mismatch"),
         "Validation Status": status,
         "Confidence Score": _extract_confidence_score(data),
-        "Source File Name": _first_available(data, ["Source File Name", "File Name", "Filename"]),
+        "Source File Name": os.path.basename(source_file_name or _first_available(data, ["Source File Name", "File Name", "Filename"], default="") or "") or None,
     }
 
     frame = pd.DataFrame([row], columns=EXCEL_COLUMNS)
@@ -75,8 +75,8 @@ def _prepare_row(data, status):
     return frame
 
 
-def write_to_excel(data, status, output_path):
-    df = _prepare_row(data, status)
+def write_to_excel(data, status, output_path, source_file_name=None):
+    df = _prepare_row(data, status, source_file_name=source_file_name)
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
 

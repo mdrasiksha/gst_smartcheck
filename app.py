@@ -114,7 +114,7 @@ if uploaded_zip:
                     out = os.path.join("output", file.replace(".pdf", ".xlsx"))
 
                     try:
-                        data, status = process_invoice(pdf, out)
+                        data, status = process_invoice(pdf, out, source_file_name=file)
 
                         results.append({
                             "Invoice": file,
@@ -172,7 +172,7 @@ if uploaded_file:
         st.info("🔍 Reading invoice...")
         progress.progress(30)
 
-        data, status = process_invoice(pdf_path, output_file)
+        data, status = process_invoice(pdf_path, output_file, source_file_name=uploaded_file.name)
 
         progress.progress(80)
         st.info("📊 Generating Excel report...")

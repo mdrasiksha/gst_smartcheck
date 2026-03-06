@@ -1,10 +1,12 @@
+import os
+
 from ocr import extract_text_from_pdf
 from extractor_wrapper import extract_with_audit
 from validators import validate_invoice
 from excel_writer import write_to_excel
 
 
-def _extract_data_from_pdf_input(pdf_input):
+def _extract_data_from_pdf_input(pdf_input, source_file_name=None):
     text = extract_text_from_pdf(pdf_input)
 
     if not text or len(text.strip()) < 50:
@@ -19,18 +21,23 @@ def _extract_data_from_pdf_input(pdf_input):
             data = retry_data
 
     status = validate_invoice(data)
+
+    if source_file_name:
+        data["Source File Name"] = os.path.basename(source_file_name)
+
     return data, status
 
 
-def process_invoice(pdf_path, output_path):
-    data, status = _extract_data_from_pdf_input(pdf_path)
-    write_to_excel(data, status, output_path)
+def process_invoice(pdf_path, output_path, source_file_name=None):
+    resolved_source_file_name = source_file_name or pdf_path
+    data, status = _extract_data_from_pdf_input(pdf_path, source_file_name=resolved_source_file_name)
+    write_to_excel(data, status, output_path, source_file_name=resolved_source_file_name)
     return data, status
 
 
-def process_invoice_bytes(pdf_bytes, output_path):
-    data, status = _extract_data_from_pdf_input(pdf_bytes)
-    write_to_excel(data, status, output_path)
+def process_invoice_bytes(pdf_bytes, output_path, source_file_name=None):
+    data, status = _extract_data_from_pdf_input(pdf_bytes, source_file_name=source_file_name)
+    write_to_excel(data, status, output_path, source_file_name=source_file_name)
     return data, status
 
 
@@ -55,9 +62,13 @@ def process_invoices_bulk(invoice_jobs):
 
         try:
             if "pdf_bytes" in job:
-                data, status = process_invoice_bytes(job["pdf_bytes"], output_path)
+                data, status = process_invoice_bytes(
+                    job["pdf_bytes"], output_path, source_file_name=name
+                )
             else:
-                data, status = process_invoice(job["pdf_path"], output_path)
+                data, status = process_invoice(
+                    job["pdf_path"], output_path, source_file_name=name
+                )
 
             confidence = data.get("Confidence") if isinstance(data.get("Confidence"), dict) else {}
             confidence_score = round((sum(confidence.values()) / len(confidence)) * 100, 2) if confidence else None
