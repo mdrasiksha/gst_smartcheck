@@ -186,50 +186,6 @@ def _line_total_candidates(line: str) -> list[float]:
     return amounts
 
 
-
-
-def _extract_igst_amount_from_bottom_table(text: str) -> float | None:
-    """Prefer IGST amount from the bottom HSN/tax summary table over inline description entries."""
-    idx = text.rfind("IGST AMOUNT")
-    if idx == -1:
-        return None
-
-    segment = text[idx: idx + 800]
-    lines = segment.split("\n")[:8]
-    candidates: list[float] = []
-
-    for line in lines:
-        for m in re.findall(r"\d{1,3}(?:,\d{3})*\.\d{2}", line):
-            val = float(m.replace(",", ""))
-            if val > 0:
-                candidates.append(val)
-
-    if not candidates:
-        return None
-
-    # Bottom table IGST amount is typically the smallest non-zero currency value in that table slice.
-    return min(candidates)
-
-
-def _recover_larger_total(text: str, taxable_amount: float | None) -> float | None:
-    if taxable_amount is None:
-        return None
-
-    total_line_candidates: list[float] = []
-    for line in text.split("\n"):
-        if re.search(r"\b(GRAND TOTAL|TOTAL AMOUNT|TOTAL INVOICE VALUE|AMOUNT PAYABLE|NET PAYABLE|TOTAL)\b", line):
-            total_line_candidates.extend(_line_total_candidates(line))
-
-    money_candidates = [
-        float(m.replace(",", ""))
-        for m in re.findall(r"\d{1,3}(?:,\d{3})*\.\d{2}", text)
-    ]
-
-    all_candidates = sorted({round(v, 2) for v in (total_line_candidates + money_candidates) if v > taxable_amount})
-    if not all_candidates:
-        return None
-    return all_candidates[-1]
-
 def _validate_tax_math(data: Dict) -> tuple[bool, float]:
     taxable = float(data.get("Taxable Amount") or 0)
     cgst = float(data.get("CGST Amount") or 0)
@@ -342,12 +298,6 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         data["Confidence"]["Taxable Amount"] = 0.98
         data["Confidence"]["Total Tax Amount"] = 0.98
         applied_rules.append("SUMMARY_TABLE_TOTAL_ROW")
-
-    igst_bottom_table = _extract_igst_amount_from_bottom_table(text)
-    if igst_bottom_table is not None:
-        data["IGST Amount"] = igst_bottom_table
-        data["Confidence"]["IGST Amount"] = 0.97
-        applied_rules.append("IGST_FROM_BOTTOM_TABLE")
 
     # =========================================================
     # HSN / SAC CODE EXTRACTION (NON-DESTRUCTIVE)
@@ -720,17 +670,6 @@ def _extract_invoice_fields_regex(text: str) -> dict:
             data["Final Amount"] = words_total
             data["Confidence"]["Final Amount"] = 0.98
             applied_rules.append("FINAL_OVERRIDDEN_BY_WORDS")
-
-    if (
-        data.get("Final Amount") is not None
-        and data.get("Taxable Amount") is not None
-        and float(data["Final Amount"]) < float(data["Taxable Amount"])
-    ):
-        larger_total = _recover_larger_total(text, float(data["Taxable Amount"]))
-        if larger_total is not None:
-            data["Final Amount"] = larger_total
-            data["Confidence"]["Final Amount"] = 0.9
-            applied_rules.append("FINAL_RECOVERED_WHEN_BELOW_TAXABLE")
 
     # =========================================================
     # OCR CONCAT GUARD (87338.14 KILLER)
