@@ -4,6 +4,8 @@ import re
 from typing import Dict
 from urllib import error, request
 
+from word2number import w2n
+
 GSTIN_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
@@ -168,6 +170,19 @@ def _extract_amount_chargeable_in_words(text: str) -> float | None:
                 return round(parsed, 2)
     return None
 
+
+
+
+def get_amount_from_words(text):
+    try:
+        # Find text after 'Amount in Words:'
+        match = re.search(r'Amount in Words:\s*(.*)', text, re.IGNORECASE)
+        if not match: return None
+        clean_str = match.group(1).split('only')[0] # Remove 'only'
+        clean_str = re.sub(r'[^a-zA-Z\s-]', '', clean_str) # Keep only words
+        return float(w2n.word_to_num(clean_str))
+    except:
+        return None
 
 def _extract_amount_in_words_value(text: str) -> float | None:
     """Extract and parse amount from an 'Amount in Words:' style anchor."""
@@ -399,6 +414,13 @@ def run_validation_engine(text: str, data: Dict) -> Dict:
 
     validated["Validation"] = "Verified" if is_valid else "Math Mismatch"
     validated["Requires Manual Review"] = bool((validated.get("Final Amount") in (None, 0)) or not is_valid)
+
+    if not is_valid:
+        validated["Taxable Amount"] = None
+        validated["Sub Total"] = None
+        validated["CGST Amount"] = None
+        validated["SGST Amount"] = None
+        validated["IGST Amount"] = None
     validated["Math Expected Total"] = expected
     validated["Math Difference"] = math_difference
     validated["Step A - Words Match"] = step_a_passed
@@ -478,7 +500,9 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         if data["Invoice Date"]:
             break
 
-    words_total = _extract_amount_in_words_value(text)
+    words_total = get_amount_from_words(text)
+    if words_total is None:
+        words_total = _extract_amount_in_words_value(text)
     if words_total is None:
         words_total = _extract_amount_chargeable_in_words(text)
     if words_total is not None:
@@ -565,14 +589,13 @@ def _extract_invoice_fields_regex(text: str) -> dict:
                     final = nums[-1]
                     break
 
-    if final is not None:
-        data["Final Amount"] = round(final, 2)
-        data["Confidence"]["Final Amount"] = 0.9
-
-    if words_total is not None and data.get("Final Amount") is None:
+    if words_total is not None:
         data["Final Amount"] = round(words_total, 2)
         data["Confidence"]["Final Amount"] = 0.98
-        applied_rules.append("FINAL_FROM_WORDS_FALLBACK")
+        applied_rules.append("FINAL_FROM_AMOUNT_IN_WORDS_ANCHOR")
+    elif final is not None:
+        data["Final Amount"] = round(final, 2)
+        data["Confidence"]["Final Amount"] = 0.9
 
     if (
         data.get("Taxable Amount") is not None
