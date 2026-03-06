@@ -123,6 +123,7 @@ async def upload_invoice(
             content={"error": "XML requires Pro"},
         )
 
+    original_filename = os.path.basename(file.filename or "")
     pdf_bytes = await file.read()
     unique_id = str(uuid.uuid4())
     storage_file_name = f"{unique_id}.pdf"
@@ -136,7 +137,9 @@ async def upload_invoice(
         stored_pdf_bytes = download_invoice_pdf(storage_path)
 
         # 3) Write Excel into outputs so it remains downloadable until cleanup
-        data, status = process_invoice_bytes(stored_pdf_bytes, excel_output_path)
+        data, status = process_invoice_bytes(
+            stored_pdf_bytes, excel_output_path, source_file_name=original_filename
+        )
 
         # 4) Upload XLSX output to Supabase only when requested.
         time.sleep(0.5)
