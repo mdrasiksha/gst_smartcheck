@@ -25,6 +25,7 @@ EXCEL_COLUMNS = [
 ]
 
 NUMERIC_COLUMNS = ["Taxable Value", "CGST", "SGST", "IGST", "Total", "Confidence Score"]
+CURRENCY_COLUMNS = ["Taxable Value", "CGST", "SGST", "IGST", "Total"]
 
 
 def _first_available(data, keys, default=None):
@@ -72,6 +73,9 @@ def _prepare_row(data, status, source_file_name=None):
     for col in NUMERIC_COLUMNS:
         frame[col] = pd.to_numeric(frame[col], errors="coerce")
 
+    for col in CURRENCY_COLUMNS:
+        frame[col] = frame[col].round(2)
+
     return frame
 
 
@@ -100,10 +104,14 @@ def write_to_excel(data, status, output_path, source_file_name=None):
 
     validation_col = EXCEL_COLUMNS.index("Validation") + 1
     gst_col = EXCEL_COLUMNS.index("GSTIN") + 1
+    currency_col_indexes = [EXCEL_COLUMNS.index(col) + 1 for col in CURRENCY_COLUMNS]
 
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
         for cell in row:
             cell.border = thin_border
+
+        for col_idx in currency_col_indexes:
+            row[col_idx - 1].number_format = "0.00"
 
         validation_cell = row[validation_col - 1]
         validation_value = str(validation_cell.value or "").strip().lower()
