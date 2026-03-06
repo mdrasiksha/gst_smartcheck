@@ -169,6 +169,72 @@ def _extract_amount_chargeable_in_words(text: str) -> float | None:
     return None
 
 
+def _extract_amount_in_words_value(text: str) -> float | None:
+    """Extract and parse amount from an 'Amount in Words:' style anchor."""
+    lines = text.split("\n")
+    for idx, line in enumerate(lines):
+        if "AMOUNT IN WORDS" not in line:
+            continue
+
+        candidates = []
+        inline = re.search(r"AMOUNT\s+IN\s+WORDS\s*[:\-]\s*(.+)$", line)
+        if inline and inline.group(1).strip():
+            candidates.append(inline.group(1).strip())
+
+        if idx + 1 < len(lines):
+            candidates.append(lines[idx + 1].strip())
+
+        for candidate in candidates:
+            cleaned = re.sub(r"\b(INR|RUPEES?|ONLY)\b", " ", candidate, flags=re.IGNORECASE)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            parsed = _words_to_number(cleaned)
+            if parsed is not None:
+                return round(parsed, 2)
+    return None
+
+
+def _extract_priority_invoice_number(text: str) -> str | None:
+    match = re.search(r"INVOICE\s+NUMBER\s*[:\-]\s*([A-Z0-9][A-Z0-9\-/]*)", text)
+    if not match:
+        return None
+    candidate = match.group(1).strip(" -:/")
+    return None if is_non_invoice_identifier(candidate) else candidate
+
+
+def _extract_labelled_amount(lines: list[str], labels: tuple[str, ...]) -> float | None:
+    for i, line in enumerate(lines):
+        upper_line = line.upper()
+        if not any(label in upper_line for label in labels):
+            continue
+
+        nums = _line_total_candidates(line)
+        if nums:
+            return round(nums[-1], 2)
+
+        if i + 1 < len(lines):
+            next_nums = _line_total_candidates(lines[i + 1])
+            if next_nums:
+                return round(next_nums[-1], 2)
+    return None
+
+
+def _extract_priority_cgst_sgst(lines: list[str]) -> tuple[float | None, float | None]:
+    cgst_amount = None
+    sgst_amount = None
+    for line in lines:
+        if cgst_amount is None and re.search(r"(?:9\s*%\s*CGST|CGST\s*[:\-]?\s*9\s*%)", line):
+            nums = _line_total_candidates(line)
+            if nums:
+                cgst_amount = round(nums[-1], 2)
+        if sgst_amount is None and re.search(r"(?:9\s*%\s*SGST|SGST\s*[:\-]?\s*9\s*%)", line):
+            nums = _line_total_candidates(line)
+            if nums:
+                sgst_amount = round(nums[-1], 2)
+        if cgst_amount is not None and sgst_amount is not None:
+            break
+    return cgst_amount, sgst_amount
+
+
 def _extract_summary_totals(text: str) -> tuple[float | None, float | None]:
     table_anchor = re.search(r"HSN/SAC\s+TAXABLE\s+VALUE[\s\S]{0,1200}?\bTOTAL\b", text)
     if not table_anchor:
@@ -243,7 +309,7 @@ def _extract_tax_summary_details(text: str) -> dict:
 
 def _line_total_candidates(line: str) -> list[float]:
     amounts = []
-    for match in re.finditer(r"\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{1,2}|\d+", line):
+    for match in re.finditer(r"\b\d+(?:,\d{3})*(?:\.\d{1,2})?\b", line):
         suffix = line[match.end(): match.end() + 10].strip().upper()
         if suffix.startswith("NOS") or suffix.startswith("UNITS") or suffix.startswith("PCS") or suffix.startswith("QTY"):
             continue
@@ -261,7 +327,7 @@ def _find_larger_total_candidate(lines: list[str], minimum: float) -> float | No
     return None
 
 
-def _validate_tax_math(data: Dict) -> tuple[bool, float]:
+def _validate_tax_math(data: Dict) -> tuple[bool, float, float]:
     taxable = float(data.get("Taxable Amount") or 0)
     cgst = float(data.get("CGST Amount") or 0)
     sgst = float(data.get("SGST Amount") or 0)
@@ -270,12 +336,13 @@ def _validate_tax_math(data: Dict) -> tuple[bool, float]:
     final_amount = data.get("Final Amount")
 
     if final_amount is None:
-        return False, 0.0
+        return False, 0.0, 0.0
 
     tax_value = float(total_tax) if total_tax is not None else (igst if igst > 0 else (cgst + sgst))
     expected = round(taxable + tax_value, 2)
-    actual = float(final_amount)
-    return abs(expected - actual) <= 0.01, expected
+    actual = round(float(final_amount), 2)
+    difference = round(actual - expected, 2)
+    return abs(difference) <= 0.01, expected, difference
 
 
 def _retry_with_aggressive_patterns(text: str, data: Dict) -> Dict:
@@ -317,14 +384,28 @@ def run_validation_engine(text: str, data: Dict) -> Dict:
     for key in ("Taxable Amount", "CGST Amount", "SGST Amount", "IGST Amount", "Final Amount"):
         validated["Confidence"].setdefault(key, 0.4 if validated.get(key) is None else 0.7)
 
-    is_valid, expected = _validate_tax_math(validated)
-    if not is_valid:
+    words_total = validated.get("Amount in Words Parsed")
+    final_amount = validated.get("Final Amount")
+    words_match = words_total is not None and final_amount is not None and _is_close(float(words_total), float(final_amount), tolerance=0.01)
+
+    is_valid_math, expected, math_difference = _validate_tax_math(validated)
+    if not is_valid_math:
         validated = _retry_with_aggressive_patterns(text, validated)
-        is_valid, expected = _validate_tax_math(validated)
+        is_valid_math, expected, math_difference = _validate_tax_math(validated)
+
+    step_a_passed = words_match if words_total is not None else True
+    step_b_passed = is_valid_math
+    is_valid = step_a_passed and step_b_passed
 
     validated["Validation"] = "Verified" if is_valid else "Math Mismatch"
     validated["Requires Manual Review"] = bool((validated.get("Final Amount") in (None, 0)) or not is_valid)
     validated["Math Expected Total"] = expected
+    validated["Math Difference"] = math_difference
+    validated["Step A - Words Match"] = step_a_passed
+    validated["Step B - Tax Math Match"] = step_b_passed
+
+    if words_total is not None and final_amount is not None:
+        validated["Words vs Total Difference"] = round(float(final_amount) - float(words_total), 2)
 
     if validated["Requires Manual Review"]:
         validated["Confidence"]["Final Amount"] = min(validated["Confidence"].get("Final Amount", 0.7), 0.4)
@@ -356,6 +437,12 @@ def _extract_invoice_fields_regex(text: str) -> dict:
 
     lines = text.split("\n")
 
+    priority_invoice = _extract_priority_invoice_number(text)
+    if priority_invoice:
+        data["Invoice Number"] = priority_invoice
+        data["Confidence"]["Invoice Number"] = 0.99
+        applied_rules.append("INVOICE_NUMBER_LABEL_PRIORITY")
+
     gst = re.search(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b", text)
     if gst and validate_gstin_checksum(gst.group()):
         data["GST Number"] = gst.group()
@@ -365,15 +452,16 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         r"(?:INVOICE|INV)\s*(?:NO|NUMBER)?\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-/]*\d(?:[A-Z0-9\-/]*))",
         r"\b(\d{3,8}/\d{2}-\d{2})\b",
     ]
-    for pattern in inv_patterns:
-        inv = re.search(pattern, text)
-        if inv:
-            candidate = inv.group(1).strip(" -:/")
-            if not is_non_invoice_identifier(candidate):
-                data["Invoice Number"] = candidate
-                data["Confidence"]["Invoice Number"] = 0.95
-                applied_rules.append("INVOICE_NO_WITH_SUFFIX")
-                break
+    if not data.get("Invoice Number"):
+        for pattern in inv_patterns:
+            inv = re.search(pattern, text)
+            if inv:
+                candidate = inv.group(1).strip(" -:/")
+                if not is_non_invoice_identifier(candidate):
+                    data["Invoice Number"] = candidate
+                    data["Confidence"]["Invoice Number"] = 0.95
+                    applied_rules.append("INVOICE_NO_WITH_SUFFIX")
+                    break
 
     date_patterns = [
         r"\b\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}\b",
@@ -390,11 +478,13 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         if data["Invoice Date"]:
             break
 
-    words_total = _extract_amount_chargeable_in_words(text)
+    words_total = _extract_amount_in_words_value(text)
+    if words_total is None:
+        words_total = _extract_amount_chargeable_in_words(text)
     if words_total is not None:
-        data["Amount Chargeable (in words) Parsed"] = words_total
-        data["Confidence"]["Amount Chargeable (in words) Parsed"] = 0.98
-        applied_rules.append("ANCHOR_TOTAL_FROM_WORDS")
+        data["Amount in Words Parsed"] = round(words_total, 2)
+        data["Confidence"]["Amount in Words Parsed"] = 0.98
+        applied_rules.append("AMOUNT_IN_WORDS_VALIDATION_ANCHOR")
 
     summary = _extract_tax_summary_details(text)
     if summary.get("summary_taxable") is not None and summary.get("summary_tax") is not None:
@@ -410,6 +500,13 @@ def _extract_invoice_fields_regex(text: str) -> dict:
     if summary.get("line_tax_sum") is not None:
         data["Line Item Tax Sum"] = summary["line_tax_sum"]
 
+    net_amount = _extract_labelled_amount(lines, ("NET AMOUNT",))
+    if net_amount is not None:
+        data["Taxable Amount"] = round(net_amount, 2)
+        data["Sub Total"] = round(net_amount, 2)
+        data["Confidence"]["Taxable Amount"] = max(data["Confidence"].get("Taxable Amount", 0.0), 0.99)
+        applied_rules.append("NET_AMOUNT_PRIORITY")
+
     if data["Taxable Amount"] is None:
         subtotal = re.search(
             r"(?:SUB\s*TOTAL|TAXABLE\s*VALUE|TAXABLE\s*AMOUNT|BASIC\s*AMOUNT)[^\d]{0,40}(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+\.\d{1,2}|\d+)",
@@ -421,20 +518,39 @@ def _extract_invoice_fields_regex(text: str) -> dict:
             data["Sub Total"] = taxable
             data["Confidence"]["Taxable Amount"] = 0.9
 
+    priority_cgst, priority_sgst = _extract_priority_cgst_sgst(lines)
+    if priority_cgst is not None:
+        data["CGST Amount"] = priority_cgst
+        data["Confidence"]["CGST Amount"] = 0.95
+        applied_rules.append("CGST_9_PERCENT_PRIORITY")
+    if priority_sgst is not None:
+        data["SGST Amount"] = priority_sgst
+        data["Confidence"]["SGST Amount"] = 0.95
+        applied_rules.append("SGST_9_PERCENT_PRIORITY")
+
     for tax in ["CGST", "SGST", "IGST"]:
+        if tax in {"CGST", "SGST"} and data.get(f"{tax} Amount"):
+            continue
         for line in lines:
             m = re.search(rf"\b{tax}\b[^\d]{{0,20}}(\d{{1,3}}(?:,\d{{3}})+(?:\.\d{{1,2}})?|\d+\.\d{{1,2}})", line)
             if m:
-                data[f"{tax} Amount"] = float(m.group(1).replace(",", ""))
+                data[f"{tax} Amount"] = round(float(m.group(1).replace(",", "")), 2)
                 data["Confidence"][f"{tax} Amount"] = 0.9
                 break
 
-    if data.get("Total Tax Amount") is None:
+    if data.get("CGST Amount") and data.get("SGST Amount"):
+        data["Total Tax Amount"] = round(float(data["CGST Amount"]) + float(data["SGST Amount"]), 2)
+        data["Confidence"]["Total Tax Amount"] = max(data["Confidence"].get("Total Tax Amount", 0.0), 0.95)
+        applied_rules.append("TOTAL_TAX_FROM_9_PERCENT_COMPONENTS")
+    elif data.get("Total Tax Amount") is None:
         tax_sum = data["CGST Amount"] + data["SGST Amount"] + data["IGST Amount"]
         if tax_sum > 0:
             data["Total Tax Amount"] = round(tax_sum, 2)
 
-    final = None
+    final = _extract_labelled_amount(lines, ("TOTAL AMOUNT", "GRAND TOTAL"))
+    if final is not None:
+        applied_rules.append("TOTAL_AMOUNT_LABEL_PRIORITY")
+
     for line in lines:
         if re.search(r"\b(GRAND TOTAL|TOTAL AMOUNT|AMOUNT PAYABLE|NET PAYABLE|TOTAL)\b", line):
             nums = _line_total_candidates(line)
@@ -453,11 +569,10 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         data["Final Amount"] = round(final, 2)
         data["Confidence"]["Final Amount"] = 0.9
 
-    if words_total is not None:
-        if data.get("Final Amount") is None or not _is_close(data["Final Amount"], words_total, tolerance=0.01):
-            data["Final Amount"] = words_total
-            data["Confidence"]["Final Amount"] = 0.98
-            applied_rules.append("FINAL_VALIDATED_BY_WORDS_ANCHOR")
+    if words_total is not None and data.get("Final Amount") is None:
+        data["Final Amount"] = round(words_total, 2)
+        data["Confidence"]["Final Amount"] = 0.98
+        applied_rules.append("FINAL_FROM_WORDS_FALLBACK")
 
     if (
         data.get("Taxable Amount") is not None
@@ -479,6 +594,10 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         data["Math Reconciliation Total"] = recon_total
         data["Math Reconciliation Passed"] = _is_close(recon_total, data["Final Amount"], tolerance=0.01)
         applied_rules.append("MATHEMATICAL_RECONCILIATION")
+
+    for amount_key in ("Taxable Amount", "Sub Total", "CGST Amount", "SGST Amount", "IGST Amount", "Total Tax Amount", "Final Amount"):
+        if data.get(amount_key) is not None:
+            data[amount_key] = round(float(data[amount_key]), 2)
 
     data["Is GST Invoice"] = bool(
         data.get("GST Number") or data.get("CGST Amount") or data.get("SGST Amount") or data.get("IGST Amount")
