@@ -149,15 +149,23 @@ def _words_to_number(words: str) -> float | None:
 
 
 def _extract_amount_chargeable_in_words(text: str) -> float | None:
-    for i, line in enumerate(text.split("\n")):
-        if "AMOUNT CHARGEABLE (IN WORDS)" in line:
-            candidates = [line]
-            if i + 1 < len(text.split("\n")):
-                candidates.append(text.split("\n")[i + 1])
-            for candidate in candidates:
-                parsed = _words_to_number(candidate)
-                if parsed is not None:
-                    return round(parsed, 2)
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if "AMOUNT CHARGEABLE (IN WORDS)" not in line:
+            continue
+
+        candidates = []
+        inline = re.search(r"AMOUNT\s+CHARGEABLE\s*\(IN\s+WORDS\)\s*[:\-]?\s*(.+)$", line)
+        if inline:
+            candidates.append(inline.group(1).strip())
+
+        if i + 1 < len(lines):
+            candidates.append(lines[i + 1].strip())
+
+        for candidate in candidates:
+            parsed = _words_to_number(candidate)
+            if parsed is not None:
+                return round(parsed, 2)
     return None
 
 
@@ -176,14 +184,81 @@ def _extract_summary_totals(text: str) -> tuple[float | None, float | None]:
     return taxable, total_tax
 
 
+def _extract_tax_summary_details(text: str) -> dict:
+    lines = text.split("\n")
+    header_idx = None
+    for i, line in enumerate(lines):
+        if (
+            "HSN/SAC" in line
+            and "TAXABLE VALUE" in line
+            and any(k in line for k in ["IGST", "CGST", "SGST"])
+        ):
+            header_idx = i
+            break
+
+    if header_idx is None:
+        return {}
+
+    table_lines = lines[header_idx: min(len(lines), header_idx + 45)]
+    total_taxable = None
+    total_tax = None
+    line_taxable_sum = 0.0
+    line_tax_sum = 0.0
+    saw_line_items = False
+
+    for raw in table_lines:
+        line = raw.strip()
+        if not line:
+            continue
+
+        amounts = [float(v.replace(",", "")) for v in re.findall(r"\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+\.\d{1,2}|\d+", line)]
+        if len(amounts) < 2:
+            continue
+
+        if "TOTAL" in line:
+            total_taxable = amounts[0]
+            total_tax = round(sum(amounts[1:]), 2)
+            continue
+
+        row_amounts = amounts
+        if row_amounts and re.fullmatch(r"\d{4,8}", str(int(row_amounts[0]))):
+            row_amounts = row_amounts[1:]
+
+        if len(row_amounts) < 2:
+            continue
+
+        saw_line_items = True
+        line_taxable_sum += row_amounts[0]
+        line_tax_sum += sum(row_amounts[1:])
+
+    result = {}
+    if total_taxable is not None and total_tax is not None:
+        result["summary_taxable"] = round(total_taxable, 2)
+        result["summary_tax"] = round(total_tax, 2)
+    if saw_line_items:
+        result["line_taxable_sum"] = round(line_taxable_sum, 2)
+        result["line_tax_sum"] = round(line_tax_sum, 2)
+    return result
+
+
 def _line_total_candidates(line: str) -> list[float]:
     amounts = []
     for match in re.finditer(r"\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{1,2}|\d+", line):
-        suffix = line[match.end(): match.end() + 8].strip().upper()
-        if suffix.startswith("NOS") or suffix.startswith("UNITS"):
+        suffix = line[match.end(): match.end() + 10].strip().upper()
+        if suffix.startswith("NOS") or suffix.startswith("UNITS") or suffix.startswith("PCS") or suffix.startswith("QTY"):
             continue
         amounts.append(float(match.group().replace(",", "")))
     return amounts
+
+
+def _find_larger_total_candidate(lines: list[str], minimum: float) -> float | None:
+    for line in reversed(lines):
+        if not re.search(r"\b(TOTAL|GRAND TOTAL|AMOUNT PAYABLE|NET PAYABLE)\b", line):
+            continue
+        for value in reversed(_line_total_candidates(line)):
+            if value > minimum:
+                return value
+    return None
 
 
 def _validate_tax_math(data: Dict) -> tuple[bool, float]:
@@ -263,9 +338,6 @@ def run_validation_engine(text: str, data: Dict) -> Dict:
 def _extract_invoice_fields_regex(text: str) -> dict:
     applied_rules = []
     text = normalize_text(text)
-    print("\n================ DEBUG TEXT START ================\n")
-    print(text)
-    print("\n================ DEBUG TEXT END ================\n")
 
     data = {
         "Invoice Number": None,
@@ -276,788 +348,144 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         "CGST Amount": 0.0,
         "SGST Amount": 0.0,
         "IGST Amount": 0.0,
+        "Total Tax Amount": None,
         "Final Amount": None,
         "Is GST Invoice": False,
         "Confidence": {},
     }
 
     lines = text.split("\n")
-    final = None  # single source of truth
+
+    gst = re.search(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b", text)
+    if gst and validate_gstin_checksum(gst.group()):
+        data["GST Number"] = gst.group()
+        data["Confidence"]["GST Number"] = 0.95
+
+    inv_patterns = [
+        r"(?:INVOICE|INV)\s*(?:NO|NUMBER)?\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-/]*\d(?:[A-Z0-9\-/]*))",
+        r"\b(\d{3,8}/\d{2}-\d{2})\b",
+    ]
+    for pattern in inv_patterns:
+        inv = re.search(pattern, text)
+        if inv:
+            candidate = inv.group(1).strip(" -:/")
+            if not is_non_invoice_identifier(candidate):
+                data["Invoice Number"] = candidate
+                data["Confidence"]["Invoice Number"] = 0.95
+                applied_rules.append("INVOICE_NO_WITH_SUFFIX")
+                break
+
+    date_patterns = [
+        r"\b\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}\b",
+        r"\b\d{1,2}\s+[A-Z]{3,9}\s+\d{2,4}\b",
+        r"\b\d{1,2}-[A-Z]{3}-\d{2,4}\b",
+    ]
+    for line in lines:
+        for pat in date_patterns:
+            m = re.search(pat, line)
+            if m:
+                data["Invoice Date"] = m.group()
+                data["Confidence"]["Invoice Date"] = 0.95
+                break
+        if data["Invoice Date"]:
+            break
 
     words_total = _extract_amount_chargeable_in_words(text)
     if words_total is not None:
         data["Amount Chargeable (in words) Parsed"] = words_total
         data["Confidence"]["Amount Chargeable (in words) Parsed"] = 0.98
-        applied_rules.append("TOTAL_FROM_WORDS")
+        applied_rules.append("ANCHOR_TOTAL_FROM_WORDS")
 
-    summary_taxable, summary_total_tax = _extract_summary_totals(text)
-    if summary_taxable is not None and summary_total_tax is not None:
-        data["Taxable Amount"] = summary_taxable
-        data["Sub Total"] = summary_taxable
-        data["Total Tax Amount"] = summary_total_tax
-        data["Confidence"]["Taxable Amount"] = 0.98
-        data["Confidence"]["Total Tax Amount"] = 0.98
-        applied_rules.append("SUMMARY_TABLE_TOTAL_ROW")
+    summary = _extract_tax_summary_details(text)
+    if summary.get("summary_taxable") is not None and summary.get("summary_tax") is not None:
+        data["Taxable Amount"] = summary["summary_taxable"]
+        data["Sub Total"] = summary["summary_taxable"]
+        data["Total Tax Amount"] = summary["summary_tax"]
+        data["Confidence"]["Taxable Amount"] = 0.99
+        data["Confidence"]["Total Tax Amount"] = 0.99
+        applied_rules.append("SUMMARY_TABLE_TOTAL_ROW_PRIORITY")
 
-    # =========================================================
-    # HSN / SAC CODE EXTRACTION (NON-DESTRUCTIVE)
-    # =========================================================
-    hsn_codes = set()
+    if summary.get("line_taxable_sum") is not None:
+        data["Line Item Taxable Sum"] = summary["line_taxable_sum"]
+    if summary.get("line_tax_sum") is not None:
+        data["Line Item Tax Sum"] = summary["line_tax_sum"]
 
-    for line in lines:
-        # Common patterns: HSN 8471, HSN CODE: 9983, SAC 998313
-        matches = re.findall(r"\b(?:HSN|SAC)\s*(?:CODE)?\s*[:\-]?\s*(\d{4,8})\b", line)
-        for m in matches:
-            hsn_codes.add(m)
-
-    if hsn_codes:
-        data["HSN Codes"] = ", ".join(sorted(hsn_codes))
-        data["Confidence"]["HSN Codes"] = 0.90
-    else:
-        data["HSN Codes"] = None
-
-
-    # =========================================================
-    # GST NUMBER
-    # =========================================================
-    gst = re.search(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b", text)
-    if gst and validate_gstin_checksum(gst.group()):
-        data["GST Number"] = gst.group()
-        data["Is GST Invoice"] = True
-        data["Confidence"]["GST Number"] = 0.95
-        applied_rules.append("GST_REGEX_MATCH")
-
-    # =========================================================
-    # INVOICE NUMBER
-    # =========================================================
-    inv = re.search(r"(INVOICE|INV)\s*NO\.?\s*[:\-]?\s*([A-Z0-9\-\/]{6,})", text)
-    if inv:
-        data["Invoice Number"] = inv.group(2)
-        data["Confidence"]["Invoice Number"] = 0.95
-        applied_rules.append("INVOICE_NO_STRICT_MATCH")
-
-    else:
-        loose_inv = re.search(r"\b([A-Z]{2,5}-[A-Z0-9\-\/]{4,})\b", text)
-        if loose_inv:
-            candidate = loose_inv.group(1)
-            if not is_non_invoice_identifier(candidate):
-                data["Invoice Number"] = candidate
-                data["Confidence"]["Invoice Number"] = 0.8
-    # =========================================================
-    # NUMERIC-ONLY INVOICE NUMBER FALLBACK (SAFE)
-    # Handles: Invoice No : 1115
-    # =========================================================
-    if not data.get("Invoice Number"):
-        m = re.search(
-            r"(INVOICE\s*(NO|NUMBER)?)[^\d]{0,10}(\d{3,10})",
-            text
+    if data["Taxable Amount"] is None:
+        subtotal = re.search(
+            r"(?:SUB\s*TOTAL|TAXABLE\s*VALUE|TAXABLE\s*AMOUNT|BASIC\s*AMOUNT)[^\d]{0,40}(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+\.\d{1,2}|\d+)",
+            text,
         )
-        if m:
-            data["Invoice Number"] = m.group(3)
-            data["Confidence"]["Invoice Number"] = 0.95
-
-    # =========================================================
-    # INVOICE DATE – SAFE, NO GARBAGE
-    # =========================================================
-    date_patterns = [
-        r"\b\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}\b",
-        r"\b\d{1,2}\s+[A-Z]{3,9}\s+\d{2,4}\b",
-        r"\b\d{1,2}-[A-Z]{3}-\d{2,4}\b",
-        r"\b[A-Z]{3,9}\s+\d{1,2},?\s+\d{2,4}\b",
-    ]
-
-    found_date = None
-    for i, line in enumerate(lines):
-        if "TOTAL" in line or "%" in line:
-            continue
-        for pat in date_patterns:
-            m = re.search(pat, line)
-            if m:
-                found_date = m.group()
-                break
-        if found_date:
-            break
-
-        if ("DATED" in line or "DT." in line) and i + 1 < len(lines):
-            for pat in date_patterns:
-                m = re.search(pat, lines[i + 1])
-                if m:
-                    found_date = m.group()
-                    break
-        if found_date:
-            break
-
-    if found_date:
-        data["Invoice Date"] = found_date
-        data["Confidence"]["Invoice Date"] = 0.95
-
-    # =========================================================
-    # TAXABLE / SUBTOTAL – KEYWORD
-    # =========================================================
-    subtotal = re.search(
-        r"(SUBTOTAL|SUB TOTAL|TAXABLE VALUE|TAXABLE AMOUNT|BASIC AMOUNT)[^\d]{0,40}(\d+(\.\d{1,2})?)",
-        text,
-    )
-    if subtotal:
-        val = float(subtotal.group(2))
-        data["Taxable Amount"] = val
-        data["Sub Total"] = val
-        data["Confidence"]["Taxable Amount"] = 0.95
-        applied_rules.append("TAXABLE_KEYWORD_MATCH")
-
-    # =========================================================
-    # TAXABLE – LINE ITEM (SaaS / KREDENT / TABLE)
-    # =========================================================
-    if not data["Taxable Amount"]:
-        li = re.search(r"\b\d+\s+.+?\s+(\d+(\.\d{1,2})?)\s+\d{6}\b", text)
-        if li:
-            val = float(li.group(1))
-            data["Taxable Amount"] = val
-            data["Sub Total"] = val
+        if subtotal:
+            taxable = float(subtotal.group(1).replace(",", ""))
+            data["Taxable Amount"] = taxable
+            data["Sub Total"] = taxable
             data["Confidence"]["Taxable Amount"] = 0.9
 
-    # =========================================================
-    # =========================================================
-    # TAXABLE – OCR MERGED FIX (338.14998439)
-    # =========================================================
-    if not data["Taxable Amount"]:
-        merged = re.search(r"\b(\d+\.\d{2})(\d{6})\b", text)
-        if merged:
-            val = float(merged.group(1))
-            data["Taxable Amount"] = val
-            data["Sub Total"] = val
-            data["Confidence"]["Taxable Amount"] = 0.95
-
-    # =========================================================
-    # FINAL GUARANTEED TAXABLE FIX (INDUSTRIAL / ELECTRICAL INVOICES)
-    # CRITICAL: DO NOT MOVE, DO NOT MODIFY
-    # Only triggers if Taxable Amount is still missing
-    # =========================================================
-    if data["Taxable Amount"] is None:
-        industrial_candidates = []
-
+    for tax in ["CGST", "SGST", "IGST"]:
         for line in lines:
-            # Stop at GRAND TOTAL – never read footer
-            if "GRAND TOTAL" in line:
+            m = re.search(rf"\b{tax}\b[^\d]{{0,20}}(\d{{1,3}}(?:,\d{{3}})+(?:\.\d{{1,2}})?|\d+\.\d{{1,2}})", line)
+            if m:
+                data[f"{tax} Amount"] = float(m.group(1).replace(",", ""))
+                data["Confidence"][f"{tax} Amount"] = 0.9
                 break
 
-            # Skip tax, total, percentage lines
-            if any(k in line for k in ["CGST", "SGST", "IGST", "TOTAL", "%"]):
-                continue
+    if data.get("Total Tax Amount") is None:
+        tax_sum = data["CGST Amount"] + data["SGST Amount"] + data["IGST Amount"]
+        if tax_sum > 0:
+            data["Total Tax Amount"] = round(tax_sum, 2)
 
-            # Capture large numbers (real business values)
-            nums = re.findall(r"\b\d{4,}\.\d{1,2}\b|\b\d{4,}\b", line)
-            for n in nums:
-                try:
-                    val = float(n)
-                    industrial_candidates.append(val)
-                except:
-                    pass
-
-        if industrial_candidates:
-            # Business rule: taxable is always the largest amount before tax
-            taxable_val = max(industrial_candidates)
-            applied_rules.append("INDUSTRIAL_LARGEST_PRE_TAX")
-
-            # Hard safety: must be realistic business amount
-            if taxable_val > 1000:
-                data["Taxable Amount"] = taxable_val
-                data["Sub Total"] = taxable_val
-                data["Confidence"]["Taxable Amount"] = 0.95
-
-    # =========================================================
-    # FINAL GUARANTEED TAXABLE FIX (DO NOT MOVE – DO NOT MODIFY)
-    # =========================================================
-    if data["Taxable Amount"] is None:
-        strong_candidates = []
-
-        for line in lines:
-            if any(x in line for x in ["CGST", "SGST", "IGST", "TOTAL", "GRAND", "%"]):
-                continue
-
-            nums = re.findall(r"(\d{4,}\.\d{1,2})", line)
-            for n in nums:
-                strong_candidates.append(float(n))
-
-        if strong_candidates:
-            taxable_val = max(strong_candidates)
-
-            if taxable_val > 1000:
-                data["Taxable Amount"] = taxable_val
-                data["Sub Total"] = taxable_val
-                data["Confidence"]["Taxable Amount"] = 0.95
-    # =========================================================
-    # FINAL INDUSTRIAL / ELECTRICAL TAXABLE FIX (NON-DESTRUCTIVE)
-
-    # Blocks HSN, Order IDs, Invoice numbers from being misread as amounts
-    # =========================================================
-    if data["Taxable Amount"] is None:
-        industrial_values = []
-
-        for line in lines:
-            line_clean = line.strip()
-
-            # Stop at GRAND TOTAL – footer zone
-            if "GRAND TOTAL" in line_clean:
-                break
-
-            # Skip non-money lines
-            if any(x in line_clean for x in [
-                "HSN", "SAC", "INVOICE", "ORDER", "GSTIN", "PAN",
-                "CGST", "SGST", "IGST", "%", "QTY", "QUANTITY"
-            ]):
-                continue
-
-            # Capture only realistic money values (with decimals)
-            nums = re.findall(r"\b\d{1,3}(?:,\d{3})*\.\d{2}\b", line_clean)
-
-            for n in nums:
-                if is_hsn_code(n, line_clean):
-                    continue  # skip HSN codes safely
-
-                try:
-                    val = float(n.replace(",", ""))
-
-                    if val < 1000000:
-                        industrial_values.append(val)
-                except:
-                    pass
-
-        if industrial_values:
-            taxable_val = max(industrial_values)
-
-            # Safety: taxable must be less than final amount
-            if not data["Final Amount"] or taxable_val < data["Final Amount"]:
-                data["Taxable Amount"] = taxable_val
-                data["Sub Total"] = taxable_val
-                data["Confidence"]["Taxable Amount"] = 0.95
-
-    # GST SPLIT – WITH %
-    # =========================================================
-    percent_tax = re.findall(r"\b(CGST|SGST|IGST)\b\s*@?\s*\d+(\.\d+)?%\s+(\d+(\.\d{1,2})?)", text)
-    for tax, _, amt, _ in percent_tax:
-        data[f"{tax} Amount"] = float(amt)
-        data["Confidence"][f"{tax} Amount"] = 0.95
-
-    # =========================================================
-    # GST SPLIT – AMOUNT ONLY
-    # =========================================================
-    simple_tax = re.findall(r"\b(CGST|SGST|IGST)\b(?![^\n]*%)\s*[^\d]{0,10}(\d+(\.\d{1,2})?)", text)
-    for tax, amt, _ in simple_tax:
-        key = f"{tax} Amount"
-        if data[key] == 0:
-            data[key] = float(amt)
-            data["Confidence"][key] = 0.9
-    # =========================================================
-    # ADD-ON GST SPLIT SUPPORT
-    # Handles: CGST9 (9%) 1,348.20
-    # NON-DESTRUCTIVE (runs only if GST amount is still 0)
-    # =========================================================
-    alt_gst = re.findall(
-        r"\b(CGST|SGST|IGST)\s*\d*\s*\(?\d+(\.\d+)?%\)?\s+(\d{1,3}(?:,\d{3})*\.\d{2})",
-        text
-    )
-
-    for tax, _, amt in alt_gst:
-        key = f"{tax} Amount"
-        if data.get(key, 0) == 0:
-            data[key] = float(amt.replace(",", ""))
-            data["Confidence"][key] = 0.95
-
-    # =========================================================
-    # SAFETY: PREVENT TAX % FROM BECOMING TAXABLE (WITHOUT KILLING REAL VALUES)
-    # =========================================================
-    if data["Taxable Amount"] is not None:
-        # Only block if it's clearly a tax RATE, not a real amount
-        if data["Taxable Amount"] <= 100 and re.search(r"\b(CGST|SGST|IGST)\b", text):
-            data["Taxable Amount"] = None
-            data["Sub Total"] = None
-            data["Confidence"].pop("Taxable Amount", None)
-
-    # =========================================================
-    # FINAL AMOUNT – OCR MERGED NUMBER + GRAND TOTAL FIX
-    # Handles: 955328GRAND TOTAL
-    # =========================================================
-    if not data["Final Amount"]:
-        merged_total = re.search(
-            r"\b(\d{3,}\.\d{1,2}|\d{3,})\s*GRAND\s*TOTAL\b",
-            text
-        )
-        if merged_total:
-            data["Final Amount"] = float(merged_total.group(1))
-            data["Confidence"]["Final Amount"] = 0.95
-
-    # =========================================================
-    # ADD-ON: FINAL AMOUNT OCR MERGE FIX
-    # Handles: 955328GRAND TOTAL
-    # =========================================================
-    if data["Final Amount"] is None:
-        merged_total = re.search(
-            r"\b(\d{3,}\.\d{1,2}|\d{3,})\s*GRAND\s*TOTAL\b",
-            text
-        )
-        if merged_total:
-            data["Final Amount"] = float(merged_total.group(1))
-            data["Confidence"]["Final Amount"] = 0.95
-
-    # FINAL AMOUNT – STRICT TOTAL LINES
-    # =========================================================
+    final = None
     for line in lines:
-        if re.search(r"\b(GRAND TOTAL|TOTAL AMOUNT|TOTAL INVOICE VALUE|AMOUNT PAYABLE|NET PAYABLE|BALANCE AMOUNT|TOTAL)\b", line):
+        if re.search(r"\b(GRAND TOTAL|TOTAL AMOUNT|AMOUNT PAYABLE|NET PAYABLE|TOTAL)\b", line):
             nums = _line_total_candidates(line)
             if nums:
                 final = nums[-1]
-                break
 
-    # =========================================================
-    # MMT / TRAVEL FIX – GRAND TOTAL ON NEXT LINE (SAFE)
-    # =========================================================
-    if not final:
+    if final is None:
         for i, line in enumerate(lines):
-            if "GRAND TOTAL" in line:
-                nums = _line_total_candidates(line)
+            if "GRAND TOTAL" in line and i + 1 < len(lines):
+                nums = _line_total_candidates(lines[i + 1])
                 if nums:
                     final = nums[-1]
                     break
-                elif i + 1 < len(lines):
-                    next_nums = _line_total_candidates(lines[i + 1])
-                    if next_nums:
-                        final = next_nums[-1]
-                        break
 
-    # =========================================================
-    # ADD-ON FINAL AMOUNT SUPPORT
-    # Handles: Total ₹17,676.00
-    # NON-DESTRUCTIVE (runs only if Final Amount missing)
-    # =========================================================
-    if data["Final Amount"] is None:
-        simple_total = re.search(
-            r"\bTOTAL\b[^\d]{0,10}(₹)?\s*(\d{1,3}(?:,\d{3})*\.\d{2})",
-            text
-        )
-        if simple_total:
-            data["Final Amount"] = float(simple_total.group(2).replace(",", ""))
-            data["Confidence"]["Final Amount"] = 0.95
-
-    # =========================================================
-    # FALLBACK – LAST LARGE NUMBER (NO PIN CODES)
-    # =========================================================
-    if not final:
-        candidates = re.findall(r"\b\d{3,}\.\d{1,2}\b|\b\d{3,}\b", text)
-
-        clean_candidates = []
-        for c in candidates:
-            if not is_address_number(c, text):
-                clean_candidates.append(c)
-
-        if clean_candidates:
-            final = clean_candidates[-1]
-
-    # =========================================================
-    # ASSIGN FINAL SAFELY
-    # =========================================================
-    if final:
-        try:
-            data["Final Amount"] = float(final)
-            data["Confidence"]["Final Amount"] = 0.95
-            applied_rules.append("FINAL_FROM_TOTAL_LINE")
-
-        except:
-            pass
+    if final is not None:
+        data["Final Amount"] = round(final, 2)
+        data["Confidence"]["Final Amount"] = 0.9
 
     if words_total is not None:
-        if data.get("Final Amount") is None or not _is_close(data.get("Final Amount", 0.0), words_total, tolerance=0.01):
+        if data.get("Final Amount") is None or not _is_close(data["Final Amount"], words_total, tolerance=0.01):
             data["Final Amount"] = words_total
             data["Confidence"]["Final Amount"] = 0.98
-            applied_rules.append("FINAL_OVERRIDDEN_BY_WORDS")
+            applied_rules.append("FINAL_VALIDATED_BY_WORDS_ANCHOR")
 
-    # =========================================================
-    # OCR CONCAT GUARD (87338.14 KILLER)
-    # =========================================================
-    if data["Final Amount"] and data["Taxable Amount"]:
-        if data["Final Amount"] > data["Taxable Amount"] * 5:
-            for line in lines:
-                if "TOTAL" in line:
-                    nums = re.findall(r"\b\d+\.\d{1,2}\b|\b\d+\b", line)
-                    if nums:
-                        data["Final Amount"] = float(nums[-1])
-                        break
-
-    # =========================================================
-    # COMPUTED FALLBACK (ACT / UTILITY)
-    # =========================================================
-    if (not data["Final Amount"] or data["Final Amount"] == 0) and data["Taxable Amount"]:
-        computed = data["Taxable Amount"] + data["CGST Amount"] + data["SGST Amount"] + data["IGST Amount"]
-        if computed > data["Taxable Amount"]:
-            data["Final Amount"] = round(computed, 2)
-            data["Confidence"]["Final Amount"] = 0.95
-            applied_rules.append("FINAL_COMPUTED_FROM_GST")
-
-    # =========================================================
-    # GST FLAG
-    # =========================================================
-    data["Is GST Invoice"] = bool(
-        data["GST Number"] or data["CGST Amount"] or data["SGST Amount"] or data["IGST Amount"]
-    )
-
-    # =========================================================
-    # FINAL BUSINESS SAFETY
-    # If GST exists and Final Amount still missing,
-    # compute Final = Taxable + GST
-    # =========================================================
-    if (
-            data.get("Final Amount") in [None, 0]
-            and data.get("Taxable Amount")
-            and (
-            data.get("CGST Amount", 0)
-            + data.get("SGST Amount", 0)
-            + data.get("IGST Amount", 0)
-    ) > 0
-    ):
-        data["Final Amount"] = round(
-            data["Taxable Amount"]
-            + data["CGST Amount"]
-            + data["SGST Amount"]
-            + data["IGST Amount"], 2
-        )
-        data["Confidence"]["Final Amount"] = 0.90
-
-    # =========================================================
-    # OVERALL CONFIDENCE
-    # =========================================================
-    if data["Confidence"]:
-        data["Overall Confidence"] = round(sum(data["Confidence"].values()) / len(data["Confidence"]) * 100, 2)
-    else:
-        data["Overall Confidence"] = 0
-
-    # =========================================================
-    # FINAL CONVERGENCE FIX (DO NOT MOVE)
-    # =========================================================
-
-    # Recover GST amounts if present in text but not extracted
-    if data.get("GST Number"):
-        if data["CGST Amount"] == 0:
-            m = re.search(
-                r"CGST\s*\d*\s*\(?\d+(\.\d+)?%\)?\s+(\d{1,3}(?:,\d{3})*\.\d{2})",
-                text
-            )
-            if m:
-                data["CGST Amount"] = float(m.group(2).replace(",", ""))
-                data["Confidence"]["CGST Amount"] = 0.95
-
-        if data["SGST Amount"] == 0:
-            m = re.search(
-                r"SGST\s*\d*\s*\(?\d+(\.\d+)?%\)?\s+(\d{1,3}(?:,\d{3})*\.\d{2})",
-                text
-            )
-            if m:
-                data["SGST Amount"] = float(m.group(2).replace(",", ""))
-                data["Confidence"]["SGST Amount"] = 0.95
-
-    # Recover Final Amount from simple TOTAL line (Total ₹17,676.00)
-    if data.get("Final Amount") in [None, 0]:
-        m = re.search(
-            r"\bTOTAL\b[^\d]{0,10}(₹)?\s*(\d{1,3}(?:,\d{3})*\.\d{2})",
-            text
-        )
-        if m:
-            data["Final Amount"] = float(m.group(2).replace(",", ""))
-            data["Confidence"]["Final Amount"] = 0.95
-
-    # Absolute accounting fallback (GST applied)
-    if (
-        data.get("Final Amount") in [None, 0]
-        and data.get("Taxable Amount")
-        and (data["CGST Amount"] + data["SGST Amount"] + data["IGST Amount"]) > 0
-    ):
-        data["Final Amount"] = round(
-            data["Taxable Amount"]
-            + data["CGST Amount"]
-            + data["SGST Amount"]
-            + data["IGST Amount"], 2
-        )
-        data["Confidence"]["Final Amount"] = 0.90
-
-    # =========================================================
-    # FINAL HARD GUARANTEE (DO NOT MOVE)
-    # Ensures Final Amount is NEVER lost by later fallbacks
-    # =========================================================
-    if data.get("Final Amount") in [None, 0]:
-        money_vals = []
-
-        for m in re.findall(r"\b\d{1,3}(?:,\d{3})*\.\d{2}\b", text):
-            try:
-                money_vals.append(float(m.replace(",", "")))
-            except:
-                pass
-
-        # Take the maximum realistic amount as Final Amount
-        if money_vals:
-            data["Final Amount"] = max(money_vals)
-            data["Confidence"]["Final Amount"] = 0.90
-
-    print(
-        data["Taxable Amount"],
-        data["CGST Amount"],
-        data["SGST Amount"],
-        data["Final Amount"]
-    )
-
-    # =========================================================
-    # FINAL INVOICE DETAILS RECOVERY (SAFE & NON-DESTRUCTIVE)
-    # =========================================================
-
-    # 1. Recover Taxable Amount from Sub Total
-    if data.get("Taxable Amount") is None and data.get("Sub Total"):
-        data["Taxable Amount"] = data["Sub Total"]
-        data["Confidence"]["Taxable Amount"] = 0.90
-
-    # 2. Recover GST amounts if GST invoice but amounts missing
-    if data.get("GST Number"):
-        if data["CGST Amount"] == 0:
-            m = re.search(r"CGST[^\d]*(\d{1,3}(?:,\d{3})*\.\d{2})", text)
-            if m:
-                data["CGST Amount"] = float(m.group(1).replace(",", ""))
-                data["Confidence"]["CGST Amount"] = 0.90
-
-        if data["SGST Amount"] == 0:
-            m = re.search(r"SGST[^\d]*(\d{1,3}(?:,\d{3})*\.\d{2})", text)
-            if m:
-                data["SGST Amount"] = float(m.group(1).replace(",", ""))
-                data["Confidence"]["SGST Amount"] = 0.90
-
-        if data["IGST Amount"] == 0:
-            m = re.search(r"IGST[^\d]*(\d{1,3}(?:,\d{3})*\.\d{2})", text)
-            if m:
-                data["IGST Amount"] = float(m.group(1).replace(",", ""))
-                data["Confidence"]["IGST Amount"] = 0.90
-
-    # 3. Recover Final Amount from TOTAL line
-    if data.get("Final Amount") in [None, 0]:
-        m = re.search(r"\bTOTAL\b[^\d]*(\d{1,3}(?:,\d{3})*\.\d{2})", text)
-        if m:
-            data["Final Amount"] = float(m.group(1).replace(",", ""))
-            data["Confidence"]["Final Amount"] = 0.90
-
-    # 4. Absolute fallback – compute final if GST present
-    if (
-        data.get("Final Amount") in [None, 0]
-        and data.get("Taxable Amount")
-        and (data["CGST Amount"] + data["SGST Amount"] + data["IGST Amount"]) > 0
-    ):
-        data["Final Amount"] = round(
-            data["Taxable Amount"]
-            + data["CGST Amount"]
-            + data["SGST Amount"]
-            + data["IGST Amount"], 2
-        )
-        data["Confidence"]["Final Amount"] = 0.85
-
-    # 5. Last-resort safety: take largest monetary value
-    if data.get("Final Amount") in [None, 0]:
-        amounts = []
-        for v in re.findall(r"\b\d{1,3}(?:,\d{3})*\.\d{2}\b", text):
-            try:
-                amounts.append(float(v.replace(",", "")))
-            except:
-                pass
-        if amounts:
-            data["Final Amount"] = max(amounts)
-            data["Confidence"]["Final Amount"] = 0.80
-
-    # =========================================================
-    # FINAL GST RECOVERY (FORMAT: CGST9 (9%) 1,348.20)
-    # Non-destructive: runs only if GST amount is still 0
-    # =========================================================
-    if data.get("GST Number"):
-        if data["CGST Amount"] == 0:
-            m = re.search(
-                r"CGST\s*\d*\s*\(?\d+(\.\d+)?%\)?\s+(\d{1,3}(?:,\d{3})*\.\d{2})",
-                text
-            )
-            if m:
-                data["CGST Amount"] = float(m.group(2).replace(",", ""))
-                data["Confidence"]["CGST Amount"] = 0.95
-
-        if data["SGST Amount"] == 0:
-            m = re.search(
-                r"SGST\s*\d*\s*\(?\d+(\.\d+)?%\)?\s+(\d{1,3}(?:,\d{3})*\.\d{2})",
-                text
-            )
-            if m:
-                data["SGST Amount"] = float(m.group(2).replace(",", ""))
-                data["Confidence"]["SGST Amount"] = 0.95
-
-    # =========================================================
-    # FINAL AUTHORITATIVE FIX (DO NOT MOVE)
-    # =========================================================
-
-    # 1. Recover GST amounts (comma-free, normalized text)
-    if data.get("GST Number"):
-        if data["CGST Amount"] == 0:
-            m = re.search(r"CGST\s*\d*\s*\(?\d+(\.\d+)?%\)?\s+(\d+\.\d{2})", text)
-            if m:
-                data["CGST Amount"] = float(m.group(2))
-                data["Confidence"]["CGST Amount"] = 0.95
-
-        if data["SGST Amount"] == 0:
-            m = re.search(r"SGST\s*\d*\s*\(?\d+(\.\d+)?%\)?\s+(\d+\.\d{2})", text)
-            if m:
-                data["SGST Amount"] = float(m.group(2))
-                data["Confidence"]["SGST Amount"] = 0.95
-
-    # 2. Recover Final Amount from TOTAL (normalized text)
-    if data.get("Final Amount") in [None, 0]:
-        m = re.search(r"\bTOTAL\b[^\d]*(\d+\.\d{2})", text)
-        if m:
-            data["Final Amount"] = float(m.group(1))
-            data["Confidence"]["Final Amount"] = 0.95
-
-    # 3. Accounting truth fallback (GST applied)
-    if (
-        data.get("Final Amount") in [None, 0]
-        and data.get("Taxable Amount")
-        and (data["CGST Amount"] + data["SGST Amount"] + data["IGST Amount"]) > 0
-    ):
-        data["Final Amount"] = round(
-            data["Taxable Amount"]
-            + data["CGST Amount"]
-            + data["SGST Amount"]
-            + data["IGST Amount"], 2
-        )
-        data["Confidence"]["Final Amount"] = 0.95
-    # =========================================================
-    # FINAL GST OVERRIDE (AUTHORITATIVE)
-    # If GST exists and Final == Taxable, recompute Final
-    # =========================================================
     if (
         data.get("Taxable Amount") is not None
-        and (data["CGST Amount"] + data["SGST Amount"] + data["IGST Amount"]) > 0
-        and data.get("Final Amount") == data.get("Taxable Amount")
+        and data.get("Final Amount") is not None
+        and data["Final Amount"] < data["Taxable Amount"]
     ):
-        data["Final Amount"] = round(
-            data["Taxable Amount"]
-            + data["CGST Amount"]
-            + data["SGST Amount"]
-            + data["IGST Amount"], 2
-        )
-        data["Confidence"]["Final Amount"] = 0.95
+        replacement = _find_larger_total_candidate(lines, data["Taxable Amount"])
+        if replacement is not None:
+            data["Final Amount"] = round(replacement, 2)
+            data["Confidence"]["Final Amount"] = 0.92
+            applied_rules.append("REJECT_SMALL_TOTAL_AND_SEARCH_DOWN")
 
-    # =========================================================
-    # FINAL TAXABLE AMOUNT CORRECTION (HSN SAFE)
-    # =========================================================
-    if data.get("Taxable Amount") and data["Taxable Amount"] > 1_000_000:
-        # Likely picked an HSN or code by mistake
-        money_vals = []
-
-        for m in re.findall(r"\b\d+\.\d{2}\b", text):
-            try:
-                money_vals.append(float(m))
-            except:
-                pass
-
-        if money_vals:
-            data["Taxable Amount"] = max(money_vals)
-            data["Sub Total"] = data["Taxable Amount"]
-            data["Confidence"]["Taxable Amount"] = 0.95
-    # =========================================================
-    # FINAL TAXABLE CORRECTION (GST APPLIED CASE)
-    # If taxable equals final but GST exists, recompute taxable
-    # =========================================================
     if (
-        data.get("Final Amount") is not None
-        and data.get("Taxable Amount") == data.get("Final Amount")
-        and (data["CGST Amount"] + data["SGST Amount"] + data["IGST Amount"]) > 0
+        summary.get("line_taxable_sum") is not None
+        and summary.get("line_tax_sum") is not None
+        and data.get("Final Amount") is not None
     ):
-        data["Taxable Amount"] = round(
-            data["Final Amount"]
-            - (data["CGST Amount"] + data["SGST Amount"] + data["IGST Amount"]),
-            2
-        )
-        data["Sub Total"] = data["Taxable Amount"]
-        data["Confidence"]["Taxable Amount"] = 0.95
-    # =========================================================
-    # FINAL SERVICE / B2C INVOICE FIX (HSN SAFE)
-    # =========================================================
-    if (
-        data.get("Final Amount") is not None
-        and (data["CGST Amount"] + data["SGST Amount"] + data["IGST Amount"]) == 0
-        and data.get("Taxable Amount")
-        and data["Taxable Amount"] > data["Final Amount"] * 10
-    ):
-        # Likely HSN/SAC picked as taxable in B2C invoice
-        data["Taxable Amount"] = data["Final Amount"]
-        data["Sub Total"] = data["Final Amount"]
-        data["Confidence"]["Taxable Amount"] = 0.95
-    # =========================================================
-    # FINAL TAXABLE RECOVERY (SINGLE LINE-ITEM INVOICE)
-    # =========================================================
-    if data.get("Taxable Amount") is None:
-        money_vals = []
+        recon_total = round(summary["line_taxable_sum"] + summary["line_tax_sum"], 2)
+        data["Math Reconciliation Total"] = recon_total
+        data["Math Reconciliation Passed"] = _is_close(recon_total, data["Final Amount"], tolerance=0.01)
+        applied_rules.append("MATHEMATICAL_RECONCILIATION")
 
-        for m in re.findall(r"\b\d+\.\d{2}\b", text):
-            try:
-                val = float(m)
-                # Ignore GST lines and very small values
-                if val >= 1000:
-                    money_vals.append(val)
-            except:
-                pass
-
-        if money_vals:
-            # Taxable is the largest non-tax amount before GST
-            taxable_val = max(money_vals)
-
-            # Safety: must be less than final amount if final exists
-            if not data.get("Final Amount") or taxable_val < data["Final Amount"]:
-                data["Taxable Amount"] = taxable_val
-                data["Sub Total"] = taxable_val
-                data["Confidence"]["Taxable Amount"] = 0.95
-
-    # =========================================================
-    # FINAL GST AMOUNT RECOVERY (INDUSTRIAL INVOICE SAFE)
-    # =========================================================
-    if (
-        data.get("Taxable Amount")
-        and data["CGST Amount"] == 0
-        and data["SGST Amount"] == 0
-    ):
-        # Look for standalone GST values (e.g. 720.00 720.00)
-        gst_vals = []
-
-        for m in re.findall(r"\b\d+\.\d{2}\b", text):
-            try:
-                val = float(m)
-                # GST is usually 5%–18% of taxable
-                if 0.05 * data["Taxable Amount"] <= val <= 0.20 * data["Taxable Amount"]:
-                    gst_vals.append(val)
-            except:
-                pass
-
-        if len(gst_vals) >= 2:
-            # Assume equal CGST & SGST
-            gst_vals.sort()
-            data["CGST Amount"] = gst_vals[-1]
-            data["SGST Amount"] = gst_vals[-1]
-            data["Confidence"]["CGST Amount"] = 0.95
-            data["Confidence"]["SGST Amount"] = 0.95
-
-    if data.get("Total Tax Amount") is not None:
-        total_tax = float(data["Total Tax Amount"])
-        split_tax = float(data.get("CGST Amount", 0)) + float(data.get("SGST Amount", 0)) + float(data.get("IGST Amount", 0))
-        if abs(split_tax - total_tax) > 0.01:
-            data["CGST Amount"] = 0.0
-            data["SGST Amount"] = 0.0
-            data["IGST Amount"] = total_tax
-            data["Confidence"]["IGST Amount"] = 0.90
-            applied_rules.append("IGST_FROM_SUMMARY_TOTAL_TAX")
+    data["Is GST Invoice"] = bool(
+        data.get("GST Number") or data.get("CGST Amount") or data.get("SGST Amount") or data.get("IGST Amount")
+    )
 
     data["_rules_applied"] = applied_rules
-
     return run_validation_engine(text, data)
-
-
-
 
 
 
