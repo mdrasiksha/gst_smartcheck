@@ -185,6 +185,77 @@ def get_amount_from_words(text):
         return None
 
 
+def _extract_master_total_from_words(text: str) -> float | None:
+    """Use text anchors like 'Total Invoice Value (In Words)' / 'Amount in Words' as master total."""
+    lines = text.split("\n")
+    anchor_pattern = re.compile(r"(TOTAL\s+INVOICE\s+VALUE\s*\(IN\s+WORDS\)|AMOUNT\s+IN\s+WORDS)")
+
+    for idx, line in enumerate(lines):
+        if not anchor_pattern.search(line):
+            continue
+
+        candidates: list[str] = []
+        inline = re.split(anchor_pattern, line, maxsplit=1)
+        if len(inline) >= 3:
+            trailing = inline[-1].strip(" :-")
+            if trailing:
+                candidates.append(trailing)
+
+        if idx + 1 < len(lines):
+            nxt = lines[idx + 1].strip()
+            if nxt:
+                candidates.append(nxt)
+
+        for candidate in candidates:
+            cleaned = re.sub(r"\b(INR|RUPEES?|ONLY|PAISE|PAISA|AND)\b", " ", candidate, flags=re.IGNORECASE)
+            cleaned = re.sub(r"[^A-Z\s-]", " ", cleaned.upper())
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            if not cleaned:
+                continue
+            try:
+                return round(float(w2n.word_to_num(cleaned)), 2)
+            except ValueError:
+                continue
+
+    return None
+
+
+def _extract_round_off(lines: list[str]) -> float | None:
+    for line in lines:
+        if "ROUND OFF" not in line.upper():
+            continue
+        matches = re.findall(r"[+-]?\d+(?:,\d{3})*(?:\.\d{1,2})?", line)
+        if matches:
+            return round(float(matches[-1].replace(",", "")), 2)
+    return None
+
+
+def _sum_tax_components(lines: list[str], label: str) -> float | None:
+    non_total_values: list[float] = []
+    total_values: list[float] = []
+
+    for line in lines:
+        upper = line.upper()
+        if label not in upper:
+            continue
+
+        values = _line_total_candidates(line)
+        if not values:
+            continue
+
+        picked = round(values[-1], 2)
+        if "TOTAL" in upper:
+            total_values.append(picked)
+        else:
+            non_total_values.append(picked)
+
+    if non_total_values:
+        return round(sum(non_total_values), 2)
+    if total_values:
+        return round(max(total_values), 2)
+    return None
+
+
 def _pick_closest_to_target(values: list[float], target: float, tolerance: float = 5.0) -> float | None:
     if not values:
         return None
@@ -388,6 +459,7 @@ def _validate_tax_math(data: Dict) -> tuple[bool, float, float]:
     cgst = float(data.get("CGST Amount") or 0)
     sgst = float(data.get("SGST Amount") or 0)
     igst = float(data.get("IGST Amount") or 0)
+    round_off = float(data.get("Round Off") or 0)
     total_tax = data.get("Total Tax Amount")
     final_amount = data.get("Final Amount")
 
@@ -395,7 +467,7 @@ def _validate_tax_math(data: Dict) -> tuple[bool, float, float]:
         return False, 0.0, 0.0
 
     tax_value = float(total_tax) if total_tax is not None else (igst if igst > 0 else (cgst + sgst))
-    expected = round(taxable + tax_value, 2)
+    expected = round(taxable + tax_value + round_off, 2)
     actual = round(float(final_amount), 2)
     difference = round(actual - expected, 2)
     return abs(difference) <= 0.01, expected, difference
@@ -481,6 +553,7 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         "SGST Amount": 0.0,
         "IGST Amount": 0.0,
         "Total Tax Amount": None,
+        "Round Off": 0.0,
         "Final Amount": None,
         "Is GST Invoice": False,
         "Confidence": {},
@@ -530,7 +603,9 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         if data["Invoice Date"]:
             break
 
-    words_total = get_amount_from_words(text)
+    words_total = _extract_master_total_from_words(text)
+    if words_total is None:
+        words_total = get_amount_from_words(text)
     if words_total is None:
         words_total = _extract_amount_in_words_value(text)
     if words_total is None:
@@ -538,7 +613,7 @@ def _extract_invoice_fields_regex(text: str) -> dict:
     if words_total is not None:
         data["Amount in Words Parsed"] = round(words_total, 2)
         data["Confidence"]["Amount in Words Parsed"] = 0.98
-        applied_rules.append("AMOUNT_IN_WORDS_VALIDATION_ANCHOR")
+        applied_rules.append("MASTER_TOTAL_FROM_WORDS")
 
     summary = _extract_tax_summary_details(text)
     if summary.get("summary_taxable") is not None and summary.get("summary_tax") is not None:
@@ -584,15 +659,16 @@ def _extract_invoice_fields_regex(text: str) -> dict:
             data["Confidence"]["Taxable Amount"] = 0.86
             applied_rules.append("TAXABLE_FROM_MASTER_TOTAL_RATIO")
 
-    priority_cgst, priority_sgst = _extract_priority_cgst_sgst(lines)
-    if priority_cgst is not None:
-        data["CGST Amount"] = priority_cgst
-        data["Confidence"]["CGST Amount"] = 0.95
-        applied_rules.append("CGST_9_PERCENT_PRIORITY")
-    if priority_sgst is not None:
-        data["SGST Amount"] = priority_sgst
-        data["Confidence"]["SGST Amount"] = 0.95
-        applied_rules.append("SGST_9_PERCENT_PRIORITY")
+    summed_cgst = _sum_tax_components(lines, "CGST")
+    summed_sgst = _sum_tax_components(lines, "SGST")
+    if summed_cgst is not None:
+        data["CGST Amount"] = summed_cgst
+        data["Confidence"]["CGST Amount"] = 0.97
+        applied_rules.append("CGST_MULTI_LINE_SUM")
+    if summed_sgst is not None:
+        data["SGST Amount"] = summed_sgst
+        data["Confidence"]["SGST Amount"] = 0.97
+        applied_rules.append("SGST_MULTI_LINE_SUM")
 
     for tax in ["CGST", "SGST", "IGST"]:
         if tax in {"CGST", "SGST"} and data.get(f"{tax} Amount"):
@@ -612,6 +688,12 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         tax_sum = data["CGST Amount"] + data["SGST Amount"] + data["IGST Amount"]
         if tax_sum > 0:
             data["Total Tax Amount"] = round(tax_sum, 2)
+
+    round_off = _extract_round_off(lines)
+    if round_off is not None:
+        data["Round Off"] = round_off
+        data["Confidence"]["Round Off"] = 0.95
+        applied_rules.append("ROUND_OFF_CAPTURED")
 
     final = _extract_labelled_amount(lines, ("TOTAL AMOUNT", "GRAND TOTAL"))
     if final is not None:
@@ -639,6 +721,14 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         data["Final Amount"] = round(final, 2)
         data["Confidence"]["Final Amount"] = 0.9
 
+    if data.get("Taxable Amount") is None and data.get("Final Amount") is not None and data.get("Total Tax Amount") is not None:
+        derived_taxable = round(float(data["Final Amount"]) - float(data["Total Tax Amount"]) - float(data.get("Round Off") or 0), 2)
+        if derived_taxable > 0:
+            data["Taxable Amount"] = derived_taxable
+            data["Sub Total"] = derived_taxable
+            data["Confidence"]["Taxable Amount"] = max(data["Confidence"].get("Taxable Amount", 0.0), 0.94)
+            applied_rules.append("TAXABLE_DERIVED_FROM_MASTER_TOTAL_MINUS_TAX")
+
     if (
         data.get("Taxable Amount") is not None
         and data.get("Final Amount") is not None
@@ -661,7 +751,7 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         applied_rules.append("MATHEMATICAL_RECONCILIATION")
 
     if data.get("Taxable Amount") is not None and data.get("CGST Amount") is not None and data.get("SGST Amount") is not None and data.get("Final Amount") is not None:
-        computed_total = round(float(data["Taxable Amount"]) + float(data["CGST Amount"]) + float(data["SGST Amount"]), 2)
+        computed_total = round(float(data["Taxable Amount"]) + float(data["CGST Amount"]) + float(data["SGST Amount"]) + float(data.get("Round Off") or 0), 2)
         if not _is_close(computed_total, float(data["Final Amount"]), tolerance=0.01):
             fallback_cgst = _extract_tax_amount_from_tax_column(lines, "CGST")
             fallback_sgst = _extract_tax_amount_from_tax_column(lines, "SGST")
@@ -674,7 +764,7 @@ def _extract_invoice_fields_regex(text: str) -> dict:
             if fallback_cgst is not None or fallback_sgst is not None:
                 applied_rules.append("GST_FROM_TAX_AMOUNT_COLUMN_FALLBACK")
 
-    for amount_key in ("Taxable Amount", "Sub Total", "CGST Amount", "SGST Amount", "IGST Amount", "Total Tax Amount", "Final Amount"):
+    for amount_key in ("Taxable Amount", "Sub Total", "CGST Amount", "SGST Amount", "IGST Amount", "Total Tax Amount", "Round Off", "Final Amount"):
         if data.get(amount_key) is not None:
             data[amount_key] = round(float(data[amount_key]), 2)
 
