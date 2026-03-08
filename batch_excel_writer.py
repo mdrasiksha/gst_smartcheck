@@ -100,14 +100,31 @@ def write_batch_summary(results, output_path):
             status_cell.fill = success_fill
             status_cell.font = Font(bold=True)
 
+    min_widths = {
+        "Source File Name": 28,
+        "Invoice No": 12,
+        "Date": 14,
+        "GSTIN": 18,
+        "Taxable Value": 14,
+        "CGST": 12,
+        "SGST": 12,
+        "IGST": 12,
+        "Total": 14,
+        "Validation Status": 24,
+        "Confidence Score": 16,
+        "Rules Applied": 26,
+        "Output File": 24,
+    }
+
     for col_idx in range(1, ws.max_column + 1):
+        header = str(ws.cell(row=header_row, column=col_idx).value or "")
         col_letter = ws.cell(row=header_row, column=col_idx).column_letter
         max_length = 0
         for row_idx in range(1, ws.max_row + 1):
             value = ws.cell(row=row_idx, column=col_idx).value
             if value is not None:
                 max_length = max(max_length, len(str(value)))
-        ws.column_dimensions[col_letter].width = max_length + 3
+        ws.column_dimensions[col_letter].width = max(max_length + 3, min_widths.get(header, 12))
 
     wb.save(output_path)
 

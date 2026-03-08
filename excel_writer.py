@@ -124,14 +124,30 @@ def write_to_excel(data, status, output_path, source_file_name=None):
             if not validate_gstin_checksum(str(gst_cell.value)):
                 gst_cell.fill = mismatch_fill
 
+    min_widths = {
+        "Invoice No": 12,
+        "Date": 14,
+        "GSTIN": 18,
+        "Taxable Value": 14,
+        "CGST": 12,
+        "SGST": 12,
+        "IGST": 12,
+        "Total": 14,
+        "Validation": 16,
+        "Validation Status": 24,
+        "Confidence Score": 16,
+        "Source File Name": 28,
+    }
+
     for col_idx in range(1, ws.max_column + 1):
         max_length = 0
+        header = str(ws.cell(row=1, column=col_idx).value or "")
         col_letter = ws.cell(row=1, column=col_idx).column_letter
         for row_idx in range(1, ws.max_row + 1):
             cell_value = ws.cell(row=row_idx, column=col_idx).value
             if cell_value is not None:
                 max_length = max(max_length, len(str(cell_value)))
-        ws.column_dimensions[col_letter].width = max_length + 3
+        ws.column_dimensions[col_letter].width = max(max_length + 3, min_widths.get(header, 12))
 
     try:
         wb.save(output_path)
