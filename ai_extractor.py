@@ -395,6 +395,8 @@ def _extract_tax_summary_details(text: str) -> dict:
     table_lines = lines[header_idx: min(len(lines), header_idx + 45)]
     total_taxable = None
     total_tax = None
+    igst_row_sum = 0.0
+    igst_rows_seen = 0
     line_taxable_sum = 0.0
     line_tax_sum = 0.0
     saw_line_items = False
@@ -408,9 +410,17 @@ def _extract_tax_summary_details(text: str) -> dict:
         if len(amounts) < 2:
             continue
 
+        igst_match = re.search(
+            r"^\s*\d{4,8}\s+(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s+\d{1,2}(?:\.\d{1,2})?\s*%?\s+(\d+(?:,\d{3})*(?:\.\d{1,2})?)",
+            line,
+        )
+        if igst_match:
+            igst_rows_seen += 1
+            igst_row_sum += float(igst_match.group(2).replace(",", ""))
+
         if "TOTAL" in line:
             total_taxable = amounts[0]
-            total_tax = round(sum(amounts[1:]), 2)
+            total_tax = round(amounts[-1], 2)
             continue
 
         row_amounts = amounts
@@ -431,6 +441,8 @@ def _extract_tax_summary_details(text: str) -> dict:
     if saw_line_items:
         result["line_taxable_sum"] = round(line_taxable_sum, 2)
         result["line_tax_sum"] = round(line_tax_sum, 2)
+    if igst_rows_seen:
+        result["summary_igst_sum"] = round(igst_row_sum, 2)
     return result
 
 
@@ -616,13 +628,25 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         applied_rules.append("MASTER_TOTAL_FROM_WORDS")
 
     summary = _extract_tax_summary_details(text)
-    if summary.get("summary_taxable") is not None and summary.get("summary_tax") is not None:
+    has_summary_taxable = summary.get("summary_taxable") is not None
+    has_summary_igst = summary.get("summary_igst_sum") is not None
+
+    if has_summary_taxable:
         data["Taxable Amount"] = summary["summary_taxable"]
         data["Sub Total"] = summary["summary_taxable"]
-        data["Total Tax Amount"] = summary["summary_tax"]
         data["Confidence"]["Taxable Amount"] = 0.99
-        data["Confidence"]["Total Tax Amount"] = 0.99
         applied_rules.append("SUMMARY_TABLE_TOTAL_ROW_PRIORITY")
+
+    if summary.get("summary_tax") is not None:
+        data["Total Tax Amount"] = summary["summary_tax"]
+        data["Confidence"]["Total Tax Amount"] = 0.97
+
+    if has_summary_igst:
+        data["IGST Amount"] = summary["summary_igst_sum"]
+        data["Total Tax Amount"] = summary["summary_igst_sum"]
+        data["Confidence"]["IGST Amount"] = 0.99
+        data["Confidence"]["Total Tax Amount"] = 0.99
+        applied_rules.append("IGST_SUM_FROM_HSN_SAC_TABLE")
 
     if summary.get("line_taxable_sum") is not None:
         data["Line Item Taxable Sum"] = summary["line_taxable_sum"]
@@ -630,7 +654,7 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         data["Line Item Tax Sum"] = summary["line_tax_sum"]
 
     net_amount = _extract_labelled_amount(lines, ("NET AMOUNT",))
-    if net_amount is not None:
+    if net_amount is not None and not has_summary_taxable:
         data["Taxable Amount"] = round(net_amount, 2)
         data["Sub Total"] = round(net_amount, 2)
         data["Confidence"]["Taxable Amount"] = max(data["Confidence"].get("Taxable Amount", 0.0), 0.99)
@@ -672,6 +696,8 @@ def _extract_invoice_fields_regex(text: str) -> dict:
 
     for tax in ["CGST", "SGST", "IGST"]:
         if tax in {"CGST", "SGST"} and data.get(f"{tax} Amount"):
+            continue
+        if tax == "IGST" and has_summary_igst:
             continue
         for line in lines:
             m = re.search(rf"\b{tax}\b[^\d]{{0,20}}(\d{{1,3}}(?:,\d{{3}})+(?:\.\d{{1,2}})?|\d+\.\d{{1,2}})", line)
