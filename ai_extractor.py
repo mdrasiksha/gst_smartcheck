@@ -188,7 +188,7 @@ def get_amount_from_words(text):
 def _extract_master_total_from_words(text: str) -> float | None:
     """Use text anchors like 'Total Invoice Value (In Words)' / 'Amount in Words' as master total."""
     lines = text.split("\n")
-    anchor_pattern = re.compile(r"(TOTAL\s+INVOICE\s+VALUE\s*\(IN\s+WORDS\)|AMOUNT\s+IN\s+WORDS)")
+    anchor_pattern = re.compile(r"(TOTAL\s+INVOICE\s+VALUE\s*\(IN\s+WORDS\)|AMOUNT\s+IN\s+WORDS|TOTAL\s+IN\s+WORDS)")
 
     for idx, line in enumerate(lines):
         if not anchor_pattern.search(line):
@@ -466,7 +466,47 @@ def _find_larger_total_candidate(lines: list[str], minimum: float) -> float | No
     return None
 
 
-def _validate_tax_math(data: Dict) -> tuple[bool, float, float]:
+
+
+def _extract_freight_amount(lines: list[str]) -> float | None:
+    for line in lines:
+        if "FREIGHT" not in line.upper():
+            continue
+
+        values = _line_total_candidates(line)
+        if values:
+            return round(values[-1], 2)
+    return None
+
+
+def _extract_item_amount_sum(lines: list[str]) -> float | None:
+    in_item_table = False
+    total = 0.0
+    row_count = 0
+
+    for line in lines:
+        upper = line.upper()
+        if "DESCRIPTION" in upper and "AMOUNT" in upper:
+            in_item_table = True
+            continue
+
+        if not in_item_table:
+            continue
+
+        if any(stop in upper for stop in ("SUB TOTAL", "TOTAL TAXABLE", "CGST", "SGST", "IGST", "TOTAL IN WORDS", "AMOUNT IN WORDS")):
+            break
+
+        values = _line_total_candidates(line)
+        if values:
+            total += values[-1]
+            row_count += 1
+
+    if row_count:
+        return round(total, 2)
+    return None
+
+
+def _validate_tax_math(data: Dict, tolerance: float = 0.01) -> tuple[bool, float, float]:
     taxable = float(data.get("Taxable Amount") or 0)
     cgst = float(data.get("CGST Amount") or 0)
     sgst = float(data.get("SGST Amount") or 0)
@@ -482,7 +522,7 @@ def _validate_tax_math(data: Dict) -> tuple[bool, float, float]:
     expected = round(taxable + tax_value + round_off, 2)
     actual = round(float(final_amount), 2)
     difference = round(actual - expected, 2)
-    return abs(difference) <= 0.01, expected, difference
+    return abs(difference) <= tolerance, expected, difference
 
 
 def _retry_with_aggressive_patterns(text: str, data: Dict) -> Dict:
@@ -524,10 +564,34 @@ def run_validation_engine(text: str, data: Dict) -> Dict:
     for key in ("Taxable Amount", "CGST Amount", "SGST Amount", "IGST Amount", "Final Amount"):
         validated["Confidence"].setdefault(key, 0.4 if validated.get(key) is None else 0.7)
 
-    is_valid_math, expected, math_difference = _validate_tax_math(validated)
+    words_target = validated.get("Amount in Words Parsed")
+    if words_target is not None and validated.get("Final Amount") is None:
+        validated["Final Amount"] = round(float(words_target), 2)
+
+    is_valid_math, expected, math_difference = _validate_tax_math(validated, tolerance=0.01)
     if not is_valid_math:
         validated = _retry_with_aggressive_patterns(text, validated)
-        is_valid_math, expected, math_difference = _validate_tax_math(validated)
+        words_target = validated.get("Amount in Words Parsed")
+        if words_target is not None and validated.get("Final Amount") is None:
+            validated["Final Amount"] = round(float(words_target), 2)
+        is_valid_math, expected, math_difference = _validate_tax_math(validated, tolerance=0.01)
+
+
+    # Smart tax aggregation: when IGST is zero, trust CGST+SGST against words anchor target.
+    if words_target is not None and float(validated.get("IGST Amount") or 0.0) == 0.0:
+        recalculated = round(
+            float(validated.get("Taxable Amount") or 0.0)
+            + float(validated.get("CGST Amount") or 0.0)
+            + float(validated.get("SGST Amount") or 0.0),
+            2,
+        )
+        words_difference = round(float(words_target) - recalculated, 2)
+        if abs(words_difference) <= 1.0:
+            is_valid_math = True
+            expected = recalculated
+            math_difference = words_difference
+            validated["Final Amount"] = round(float(words_target), 2)
+            validated.setdefault("_rules_applied", []).append("CGST_SGST_WORDS_TOTAL_VALIDATION")
 
     validated["Validation"] = "Verified" if is_valid_math else "Math Mismatch"
     validated["Requires Manual Review"] = bool((validated.get("Final Amount") in (None, 0)) or not is_valid_math)
@@ -682,6 +746,19 @@ def _extract_invoice_fields_regex(text: str) -> dict:
             data["Sub Total"] = approx_taxable
             data["Confidence"]["Taxable Amount"] = 0.86
             applied_rules.append("TAXABLE_FROM_MASTER_TOTAL_RATIO")
+
+    # Freight inclusion rule: taxable must include item amount + freight charges if present.
+    freight_amount = _extract_freight_amount(lines)
+    item_amount_sum = _extract_item_amount_sum(lines)
+    if freight_amount is not None:
+        data["Freight Charges"] = freight_amount
+        if item_amount_sum is not None:
+            combined_taxable = round(item_amount_sum, 2)
+            if data.get("Taxable Amount") is None or abs(float(data.get("Taxable Amount") or 0.0) - combined_taxable) > 1.0:
+                data["Taxable Amount"] = combined_taxable
+                data["Sub Total"] = combined_taxable
+                data["Confidence"]["Taxable Amount"] = max(data["Confidence"].get("Taxable Amount", 0.0), 0.96)
+                applied_rules.append("TAXABLE_INCLUDES_FREIGHT_FROM_ITEMS")
 
     summed_cgst = _sum_tax_components(lines, "CGST")
     summed_sgst = _sum_tax_components(lines, "SGST")
