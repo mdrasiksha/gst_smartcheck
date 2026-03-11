@@ -326,11 +326,39 @@ def _extract_amount_in_words_value(text: str) -> float | None:
 
 
 def _extract_priority_invoice_number(text: str) -> str | None:
+    for pattern in (
+        r"\bPI\s*NO\b\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-/]*)",
+        r"\bESTIMATION\s*NO\b\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-/]*)",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            candidate = match.group(1).strip(" -:/")
+            if not is_non_invoice_identifier(candidate):
+                return candidate
+
     match = re.search(r"INVOICE\s+NUMBER\s*[:\-]\s*([A-Z0-9][A-Z0-9\-/]*)", text)
     if not match:
         return None
     candidate = match.group(1).strip(" -:/")
     return None if is_non_invoice_identifier(candidate) else candidate
+
+
+def _extract_priority_invoice_date(lines: list[str]) -> str | None:
+    date_pattern = r"\b\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}\b"
+    for line in lines:
+        upper = line.upper()
+        if "PRICE IS VALID TILL" in upper or "WARRANTY" in upper:
+            continue
+        if "PI DATE" in upper or "ORDER REF DATE" in upper:
+            match = re.search(date_pattern, line)
+            if match:
+                return match.group()
+    return None
+
+
+def _extract_total_order_value_excluding_tax(lines: list[str]) -> float | None:
+    labels = ("TOTAL ORDER VALUE (EXCLUDING TAX)", "TOTAL ORDER VALUE EXCLUDING TAX")
+    return _extract_labelled_amount(lines, labels)
 
 
 def _extract_labelled_amount(lines: list[str], labels: tuple[str, ...]) -> float | None:
@@ -664,20 +692,30 @@ def _extract_invoice_fields_regex(text: str) -> dict:
                     applied_rules.append("INVOICE_NO_WITH_SUFFIX")
                     break
 
+    priority_date = _extract_priority_invoice_date(lines)
+    if priority_date:
+        data["Invoice Date"] = priority_date
+        data["Confidence"]["Invoice Date"] = 0.99
+        applied_rules.append("PI_OR_ORDER_REF_DATE_PRIORITY")
+
     date_patterns = [
         r"\b\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}\b",
         r"\b\d{1,2}\s+[A-Z]{3,9}\s+\d{2,4}\b",
         r"\b\d{1,2}-[A-Z]{3}-\d{2,4}\b",
     ]
-    for line in lines:
-        for pat in date_patterns:
-            m = re.search(pat, line)
-            if m:
-                data["Invoice Date"] = m.group()
-                data["Confidence"]["Invoice Date"] = 0.95
+    if not data.get("Invoice Date"):
+        for line in lines:
+            upper = line.upper()
+            if "PRICE IS VALID TILL" in upper or "WARRANTY" in upper:
+                continue
+            for pat in date_patterns:
+                m = re.search(pat, line)
+                if m:
+                    data["Invoice Date"] = m.group()
+                    data["Confidence"]["Invoice Date"] = 0.95
+                    break
+            if data["Invoice Date"]:
                 break
-        if data["Invoice Date"]:
-            break
 
     words_total = _extract_master_total_from_words(text)
     if words_total is None:
@@ -695,7 +733,14 @@ def _extract_invoice_fields_regex(text: str) -> dict:
     has_summary_taxable = summary.get("summary_taxable") is not None
     has_summary_igst = summary.get("summary_igst_sum") is not None
 
-    if has_summary_taxable:
+    primary_order_taxable = _extract_total_order_value_excluding_tax(lines)
+    if primary_order_taxable is not None:
+        data["Taxable Amount"] = primary_order_taxable
+        data["Sub Total"] = primary_order_taxable
+        data["Confidence"]["Taxable Amount"] = 0.99
+        applied_rules.append("TOTAL_ORDER_VALUE_EXCLUDING_TAX_PRIORITY")
+
+    if has_summary_taxable and data.get("Taxable Amount") is None:
         data["Taxable Amount"] = summary["summary_taxable"]
         data["Sub Total"] = summary["summary_taxable"]
         data["Confidence"]["Taxable Amount"] = 0.99
@@ -798,15 +843,18 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         data["Confidence"]["Round Off"] = 0.95
         applied_rules.append("ROUND_OFF_CAPTURED")
 
-    final = _extract_labelled_amount(lines, ("TOTAL AMOUNT", "GRAND TOTAL"))
+    final = _extract_labelled_amount(lines, ("GRAND TOTAL",))
+    if final is None:
+        final = _extract_labelled_amount(lines, ("TOTAL AMOUNT",))
     if final is not None:
         applied_rules.append("TOTAL_AMOUNT_LABEL_PRIORITY")
 
-    for line in lines:
+    for line in reversed(lines):
         if re.search(r"\b(GRAND TOTAL|TOTAL AMOUNT|AMOUNT PAYABLE|NET PAYABLE|TOTAL)\b", line):
             nums = _line_total_candidates(line)
             if nums:
                 final = nums[-1]
+                break
 
     if final is None:
         for i, line in enumerate(lines):
@@ -855,7 +903,8 @@ def _extract_invoice_fields_regex(text: str) -> dict:
 
     if data.get("Taxable Amount") is not None and data.get("CGST Amount") is not None and data.get("SGST Amount") is not None and data.get("Final Amount") is not None:
         computed_total = round(float(data["Taxable Amount"]) + float(data["CGST Amount"]) + float(data["SGST Amount"]) + float(data.get("Round Off") or 0), 2)
-        if not _is_close(computed_total, float(data["Final Amount"]), tolerance=0.01):
+        has_multiline_gst = "CGST_MULTI_LINE_SUM" in applied_rules or "SGST_MULTI_LINE_SUM" in applied_rules
+        if not has_multiline_gst and not _is_close(computed_total, float(data["Final Amount"]), tolerance=0.01):
             fallback_cgst = _extract_tax_amount_from_tax_column(lines, "CGST")
             fallback_sgst = _extract_tax_amount_from_tax_column(lines, "SGST")
             if fallback_cgst is not None:
@@ -926,6 +975,11 @@ def _extract_with_gemini(text: str) -> Dict:
         "Extract GST invoice fields from OCR text and return only a single JSON object. "
         "Use null for missing values. Follow exactly this schema: "
         "Invoice Number, Invoice Date, GST Number, Taxable Amount, CGST Amount, SGST Amount, IGST Amount, Final Amount. "
+        "Priority rules: use PI No or Estimation No as Invoice Number; use PI Date or Order Ref Date as Invoice Date; "
+        "ignore dates near 'Price is valid till' or 'Warranty'. "
+        "For taxable amount, prioritize 'Total Order Value (Excluding Tax)'. "
+        "Sum GST from main items and secondary charges in CGST/SGST/IGST. "
+        "Capture final Grand Total from the bottom section. "
         "Important: specifically detect parts/part and labour/labor sections; sum their taxable values into Taxable Amount. "
         "Do not add commentary.\n\nOCR TEXT:\n" + text
     )
