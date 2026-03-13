@@ -336,11 +336,17 @@ def _extract_priority_invoice_number(text: str) -> str | None:
             if not is_non_invoice_identifier(candidate):
                 return candidate
 
-    match = re.search(r"INVOICE\s+NUMBER\s*[:\-]\s*([A-Z0-9][A-Z0-9\-/]*)", text)
-    if not match:
-        return None
-    candidate = match.group(1).strip(" -:/")
-    return None if is_non_invoice_identifier(candidate) else candidate
+    for pattern in (
+        r"INVOICE\s+NUMBER\s*[:\-]\s*([A-Z0-9][A-Z0-9\-/]*)",
+        r"(?:INVOICE|INV|BILL|DOC|VOUCHER|S\.?NO)\s*(?:NO|NUMBER)?\.?\s*[:\-]?\s*([A-Z0-9\-/]+)",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            candidate = match.group(1).strip(" -:/")
+            if candidate and re.search(r"\d", candidate) and not is_non_invoice_identifier(candidate):
+                return candidate
+
+    return None
 
 
 def _extract_priority_invoice_date(lines: list[str]) -> str | None:
@@ -703,7 +709,7 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         data["Confidence"]["GST Number"] = 0.95
 
     inv_patterns = [
-        r"(?:INVOICE|INV)\s*(?:NO|NUMBER)?\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-/]*\d(?:[A-Z0-9\-/]*))",
+        r"(?:INVOICE|INV|BILL|DOC|VOUCHER|S\.?NO)\s*(?:NO|NUMBER)?\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-/]*\d(?:[A-Z0-9\-/]*))",
         r"\b(\d{3,8}/\d{2}-\d{2})\b",
     ]
     if not data.get("Invoice Number"):
@@ -711,7 +717,7 @@ def _extract_invoice_fields_regex(text: str) -> dict:
             inv = re.search(pattern, text)
             if inv:
                 candidate = inv.group(1).strip(" -:/")
-                if not is_non_invoice_identifier(candidate):
+                if re.search(r"\d", candidate) and not is_non_invoice_identifier(candidate):
                     data["Invoice Number"] = candidate
                     data["Confidence"]["Invoice Number"] = 0.95
                     applied_rules.append("INVOICE_NO_WITH_SUFFIX")
@@ -888,6 +894,12 @@ def _extract_invoice_fields_regex(text: str) -> dict:
                 if nums:
                     final = nums[-1]
                     break
+
+    if final is None:
+        m = re.search(r"TOTAL\s*[:\-]?\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)", text)
+        if m:
+            final = float(m.group(1).replace(",", ""))
+            applied_rules.append("TOTAL_GENERIC_FALLBACK")
 
     if words_total is not None:
         data["Final Amount"] = round(words_total, 2)
