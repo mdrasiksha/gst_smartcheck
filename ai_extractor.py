@@ -553,6 +553,14 @@ def _validate_tax_math(data: Dict, tolerance: float = 0.01) -> tuple[bool, float
     return abs(difference) <= tolerance, expected, difference
 
 
+def _is_non_gst_invoice(data: Dict) -> bool:
+    gst_number = data.get("GST Number")
+    cgst = float(data.get("CGST Amount") or 0.0)
+    sgst = float(data.get("SGST Amount") or 0.0)
+    igst = float(data.get("IGST Amount") or 0.0)
+    return not gst_number and cgst == 0.0 and sgst == 0.0 and igst == 0.0
+
+
 def _retry_with_aggressive_patterns(text: str, data: Dict) -> Dict:
     retry_data = dict(data)
 
@@ -596,6 +604,20 @@ def run_validation_engine(text: str, data: Dict) -> Dict:
     if words_target is not None and validated.get("Final Amount") is None:
         validated["Final Amount"] = round(float(words_target), 2)
 
+    if _is_non_gst_invoice(validated):
+        validated["Is GST Invoice"] = False
+        validated["Invoice Type"] = "Non-GST Invoice"
+        validated["CGST Amount"] = 0.0
+        validated["SGST Amount"] = 0.0
+        validated["IGST Amount"] = 0.0
+        validated["Total Tax Amount"] = 0.0
+        if validated.get("Final Amount") is not None:
+            validated["Taxable Amount"] = round(float(validated["Final Amount"]), 2)
+            validated["Sub Total"] = validated["Taxable Amount"]
+    else:
+        validated["Is GST Invoice"] = True
+        validated.setdefault("Invoice Type", "GST Invoice")
+
     is_valid_math, expected, math_difference = _validate_tax_math(validated, tolerance=0.01)
     if not is_valid_math:
         validated = _retry_with_aggressive_patterns(text, validated)
@@ -621,7 +643,10 @@ def run_validation_engine(text: str, data: Dict) -> Dict:
             validated["Final Amount"] = round(float(words_target), 2)
             validated.setdefault("_rules_applied", []).append("CGST_SGST_WORDS_TOTAL_VALIDATION")
 
-    validated["Validation"] = "Verified" if is_valid_math else "Math Mismatch"
+    if validated.get("Invoice Type") == "Non-GST Invoice":
+        validated["Validation"] = "Non GST Invoice"
+    else:
+        validated["Validation"] = "Verified" if is_valid_math else "Math Mismatch"
     validated["Requires Manual Review"] = bool((validated.get("Final Amount") in (None, 0)) or not is_valid_math)
 
     validated["Math Expected Total"] = expected

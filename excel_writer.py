@@ -53,11 +53,16 @@ def _normalize_date(value):
 
 
 def _prepare_row(data, status, source_file_name=None):
+    is_non_gst = data.get("Invoice Type") == "Non-GST Invoice" or data.get("Validation") == "Non GST Invoice"
+    taxable_value = _first_available(data, ["Taxable Amount", "Taxable Value"])
+    if is_non_gst and taxable_value in (None, ""):
+        taxable_value = _first_available(data, ["Final Amount", "Total"])
+
     row = {
         "Invoice No": _first_available(data, ["Invoice Number", "Invoice No"]),
         "Date": _normalize_date(_first_available(data, ["Invoice Date", "Date"])),
         "GSTIN": str(_first_available(data, ["GST Number", "GSTIN"], default="") or "").upper() or None,
-        "Taxable Value": _first_available(data, ["Taxable Amount", "Taxable Value"]),
+        "Taxable Value": taxable_value,
         "CGST": _first_available(data, ["CGST Amount", "CGST"]),
         "SGST": _first_available(data, ["SGST Amount", "SGST"]),
         "IGST": _first_available(data, ["IGST Amount", "IGST"]),
@@ -115,7 +120,7 @@ def write_to_excel(data, status, output_path, source_file_name=None):
 
         validation_cell = row[validation_col - 1]
         validation_value = str(validation_cell.value or "").strip().lower()
-        validation_cell.fill = verified_fill if validation_value == "verified" else mismatch_fill
+        validation_cell.fill = verified_fill if validation_value in {"verified", "non gst invoice"} else mismatch_fill
         validation_cell.font = Font(bold=True)
 
         gst_cell = row[gst_col - 1]
