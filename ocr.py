@@ -41,10 +41,7 @@ def _extract_text_with_ocr(pdf_input: PdfInput) -> str:
       - tesseract binaries available in PATH
     """
     from pdf2image import convert_from_bytes, convert_from_path
-    import cv2
-    import numpy as np
     import pytesseract
-    from PIL import Image
 
     if isinstance(pdf_input, bytes):
         images = convert_from_bytes(pdf_input, dpi=300)
@@ -53,12 +50,7 @@ def _extract_text_with_ocr(pdf_input: PdfInput) -> str:
 
     ocr_pages = []
     for image in images:
-        grayscale = image.convert("L")
-        grayscale_np = np.array(grayscale)
-        _, thresholded = cv2.threshold(grayscale_np, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        processed_image = Image.fromarray(thresholded)
-
-        text = pytesseract.image_to_string(processed_image, config="--oem 3 --psm 4")
+        text = pytesseract.image_to_string(image, config="--psm 6")
         if text and text.strip():
             ocr_pages.append(text)
 
