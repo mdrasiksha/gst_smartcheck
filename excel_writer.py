@@ -10,25 +10,23 @@ from ai_extractor import validate_gstin_checksum
 
 
 EXCEL_COLUMNS = [
-    "Source File Name",
-    "Vendor Name",
-    "Vendor GSTIN",
-    "Invoice Number",
-    "Invoice Date",
-    "Taxable Amount",
-    "CGST Amount",
-    "SGST Amount",
-    "IGST Amount",
-    "Total Tax",
-    "Final Amount",
-    "Invoice Type",
+    "Invoice No",
+    "Date",
+    "GSTIN",
+    "Taxable Value",
+    "CGST",
+    "SGST",
+    "IGST",
+    "Total",
+    "Validation",
     "Validation Status",
     "Confidence Score",
-    "Rules Applied",
+    "Source File Name",
 ]
 
-NUMERIC_COLUMNS = ["Taxable Amount", "CGST Amount", "SGST Amount", "IGST Amount", "Total Tax", "Final Amount", "Confidence Score"]
-CURRENCY_COLUMNS = ["Taxable Amount", "CGST Amount", "SGST Amount", "IGST Amount", "Total Tax", "Final Amount"]
+NUMERIC_COLUMNS = ["Taxable Value", "CGST", "SGST", "IGST", "Total", "Confidence Score"]
+CURRENCY_COLUMNS = ["Taxable Value", "CGST", "SGST", "IGST", "Total"]
+
 
 def _first_available(data, keys, default=None):
     for key in keys:
@@ -55,39 +53,24 @@ def _normalize_date(value):
 
 
 def _prepare_row(data, status, source_file_name=None):
-    gstin = str(_first_available(data, ["GST Number", "GSTIN", "Vendor GSTIN"], default="") or "").upper() or None
+    is_non_gst = data.get("Invoice Type") == "Non-GST Invoice" or data.get("Validation") == "Non GST Invoice"
     taxable_value = _first_available(data, ["Taxable Amount", "Taxable Value"])
-    cgst = _first_available(data, ["CGST Amount", "CGST"], default=0) or 0
-    sgst = _first_available(data, ["SGST Amount", "SGST"], default=0) or 0
-    igst = _first_available(data, ["IGST Amount", "IGST"], default=0) or 0
-    final_amount = _first_available(data, ["Final Amount", "Total"])
-
-    if not gstin and float(cgst or 0) == 0 and float(sgst or 0) == 0 and float(igst or 0) == 0:
-        data["Invoice Type"] = "Non GST Invoice"
-        if final_amount not in (None, ""):
-            data["Taxable Amount"] = final_amount
-            taxable_value = final_amount
-
-    total_tax = _first_available(data, ["Total Tax Amount", "Total Tax"], default=None)
-    if total_tax in (None, ""):
-        total_tax = (float(cgst or 0) + float(sgst or 0) + float(igst or 0))
+    if is_non_gst and taxable_value in (None, ""):
+        taxable_value = _first_available(data, ["Final Amount", "Total"])
 
     row = {
-        "Source File Name": os.path.basename(source_file_name or _first_available(data, ["Source File Name", "File Name", "Filename"], default="") or "") or None,
-        "Vendor Name": _first_available(data, ["Vendor Name", "Supplier Name", "Party Name"]),
-        "Vendor GSTIN": gstin,
-        "Invoice Number": _first_available(data, ["Invoice Number", "Invoice No"]),
-        "Invoice Date": _normalize_date(_first_available(data, ["Invoice Date", "Date"])),
-        "Taxable Amount": taxable_value,
-        "CGST Amount": cgst,
-        "SGST Amount": sgst,
-        "IGST Amount": igst,
-        "Total Tax": total_tax,
-        "Final Amount": final_amount,
-        "Invoice Type": _first_available(data, ["Invoice Type"], default="GST Invoice"),
+        "Invoice No": _first_available(data, ["Invoice Number", "Invoice No"]),
+        "Date": _normalize_date(_first_available(data, ["Invoice Date", "Date"])),
+        "GSTIN": str(_first_available(data, ["GST Number", "GSTIN"], default="") or "").upper() or None,
+        "Taxable Value": taxable_value,
+        "CGST": _first_available(data, ["CGST Amount", "CGST"]),
+        "SGST": _first_available(data, ["SGST Amount", "SGST"]),
+        "IGST": _first_available(data, ["IGST Amount", "IGST"]),
+        "Total": _first_available(data, ["Final Amount", "Total"]),
+        "Validation": data.get("Validation", "Math Mismatch"),
         "Validation Status": status,
         "Confidence Score": _extract_confidence_score(data),
-        "Rules Applied": ", ".join(data.get("_rules_applied", [])) if isinstance(data.get("_rules_applied"), list) else _first_available(data, ["Rules Applied"], default=None),
+        "Source File Name": os.path.basename(source_file_name or _first_available(data, ["Source File Name", "File Name", "Filename"], default="") or "") or None,
     }
 
     frame = pd.DataFrame([row], columns=EXCEL_COLUMNS)
@@ -124,8 +107,8 @@ def write_to_excel(data, status, output_path, source_file_name=None):
         cell.alignment = center_align
         cell.border = thin_border
 
-    validation_col = EXCEL_COLUMNS.index("Validation Status") + 1
-    gst_col = EXCEL_COLUMNS.index("Vendor GSTIN") + 1
+    validation_col = EXCEL_COLUMNS.index("Validation") + 1
+    gst_col = EXCEL_COLUMNS.index("GSTIN") + 1
     currency_col_indexes = [EXCEL_COLUMNS.index(col) + 1 for col in CURRENCY_COLUMNS]
 
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
@@ -137,7 +120,7 @@ def write_to_excel(data, status, output_path, source_file_name=None):
 
         validation_cell = row[validation_col - 1]
         validation_value = str(validation_cell.value or "").strip().lower()
-        validation_cell.fill = verified_fill if validation_value in {"verified", "success", "non gst invoice"} else mismatch_fill
+        validation_cell.fill = verified_fill if validation_value in {"verified", "non gst invoice"} else mismatch_fill
         validation_cell.font = Font(bold=True)
 
         gst_cell = row[gst_col - 1]
@@ -147,21 +130,18 @@ def write_to_excel(data, status, output_path, source_file_name=None):
                 gst_cell.fill = mismatch_fill
 
     min_widths = {
-        "Source File Name": 28,
-        "Vendor Name": 22,
-        "Vendor GSTIN": 18,
-        "Invoice Number": 14,
-        "Invoice Date": 14,
-        "Taxable Amount": 14,
-        "CGST Amount": 12,
-        "SGST Amount": 12,
-        "IGST Amount": 12,
-        "Total Tax": 12,
-        "Final Amount": 14,
-        "Invoice Type": 16,
+        "Invoice No": 12,
+        "Date": 14,
+        "GSTIN": 18,
+        "Taxable Value": 14,
+        "CGST": 12,
+        "SGST": 12,
+        "IGST": 12,
+        "Total": 14,
+        "Validation": 16,
         "Validation Status": 24,
         "Confidence Score": 16,
-        "Rules Applied": 28,
+        "Source File Name": 28,
     }
 
     for col_idx in range(1, ws.max_column + 1):
@@ -191,14 +171,14 @@ def generate_tally_xml(data):
     row = _prepare_row(data, status=data.get("Validation Status", "Success")).iloc[0].to_dict()
 
     voucher_date = ""
-    if row.get("Invoice Date"):
-        voucher_date = pd.to_datetime(row["Invoice Date"]).strftime("%Y%m%d")
+    if row.get("Date"):
+        voucher_date = pd.to_datetime(row["Date"]).strftime("%Y%m%d")
 
-    taxable = float(row.get("Taxable Amount") or 0)
-    cgst = float(row.get("CGST Amount") or 0)
-    sgst = float(row.get("SGST Amount") or 0)
-    igst = float(row.get("IGST Amount") or 0)
-    total = float(row.get("Final Amount") or (taxable + cgst + sgst + igst))
+    taxable = float(row.get("Taxable Value") or 0)
+    cgst = float(row.get("CGST") or 0)
+    sgst = float(row.get("SGST") or 0)
+    igst = float(row.get("IGST") or 0)
+    total = float(row.get("Total") or (taxable + cgst + sgst + igst))
     total_tax = round(cgst + sgst + igst, 2)
 
     envelope = ET.Element("ENVELOPE")
@@ -221,8 +201,8 @@ def generate_tally_xml(data):
 
     ET.SubElement(voucher, "DATE").text = voucher_date
     ET.SubElement(voucher, "VOUCHERTYPENAME").text = "Sales"
-    ET.SubElement(voucher, "PARTYGSTIN").text = str(row.get("Vendor GSTIN") or "")
-    ET.SubElement(voucher, "NARRATION").text = f"GST SmartCheck import for invoice {row.get('Invoice Number') or ''}".strip()
+    ET.SubElement(voucher, "PARTYGSTIN").text = str(row.get("GSTIN") or "")
+    ET.SubElement(voucher, "NARRATION").text = f"GST SmartCheck import for invoice {row.get('Invoice No') or ''}".strip()
 
     party_entry = ET.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
     ET.SubElement(party_entry, "LEDGERNAME").text = "Sundry Debtors"
