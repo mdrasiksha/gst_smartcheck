@@ -2,7 +2,7 @@ def validate_invoice(data):
     if not data:
         return "INVALID DATA"
 
-    if data.get("Invoice Type") == "Non-GST Invoice" or data.get("Validation") == "Non GST Invoice":
+    if data.get("Invoice Type") in {"Non-GST Invoice", "Non GST Invoice"} or data.get("Validation") == "Non GST Invoice":
         return "Non GST Invoice"
 
     if data.get("Requires Manual Review"):
