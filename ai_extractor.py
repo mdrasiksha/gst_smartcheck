@@ -47,15 +47,9 @@ def is_address_number(num_str, text):
     """
     Blocks PIN codes, area codes, and address numbers.
     """
-    # Common Indian PIN code pattern
+    address_keywords = ["PIN", "TAMIL", "NADU", "CHENNAI", "BANGALORE"]
     if re.fullmatch(r"\d{6}", num_str):
-        return True
-
-    # If number is near address keywords, block it
-    address_keywords = ["PIN", "CODE", "HARYANA", "KARNATAKA", "TAMIL", "NADU", "DELHI", "MUMBAI", "BENGALURU", "BANGALORE"]
-    for word in address_keywords:
-        if word in text:
-            return True
+        return any(word in text.upper() for word in address_keywords)
 
     return False
 
@@ -63,8 +57,10 @@ def is_hsn_code(num_str, line_text):
     """
     Blocks HSN / SAC codes from being treated as money
     """
-    if "HSN" in line_text or "SAC" in line_text:
-        return True
+    cleaned = num_str.replace(",", "")
+    integer_part = cleaned.split(".", 1)[0]
+    if re.fullmatch(r"\d{4,8}", integer_part):
+        return bool(re.search(r"\b(HSN|SAC)\b", line_text.upper()))
     return False
 
 def is_non_invoice_identifier(value: str) -> bool:
@@ -482,11 +478,29 @@ def _extract_tax_summary_details(text: str) -> dict:
 
 def _line_total_candidates(line: str) -> list[float]:
     amounts = []
+    upper_line = line.upper()
     for match in re.finditer(r"\b\d+(?:,\d{3})*(?:\.\d{1,2})?\b", line):
+        raw_value = match.group()
+        normalized_value = raw_value.replace(",", "")
+        integer_part = normalized_value.split(".", 1)[0]
+
         suffix = line[match.end(): match.end() + 10].strip().upper()
         if suffix.startswith("NOS") or suffix.startswith("UNITS") or suffix.startswith("PCS") or suffix.startswith("QTY"):
             continue
-        amounts.append(float(match.group().replace(",", "")))
+
+        context_window = upper_line[max(0, match.start() - 20): match.end() + 20]
+        if is_hsn_code(raw_value, context_window):
+            continue
+
+        if re.fullmatch(r"\d{4,8}", integer_part):
+            prefix_window = upper_line[max(0, match.start() - 12): match.start()]
+            if re.search(r"\b(HSN|SAC)\b", context_window) or re.search(r"\b(HSN|SAC)\b\s*[:\-/]*\s*$", prefix_window):
+                continue
+
+        if is_address_number(integer_part, context_window):
+            continue
+
+        amounts.append(float(normalized_value))
     return amounts
 
 
@@ -570,16 +584,19 @@ def _is_non_gst_invoice(data: Dict) -> bool:
 def _retry_with_aggressive_patterns(text: str, data: Dict) -> Dict:
     retry_data = dict(data)
 
-    total_patterns = [
-        r"(?:TOTAL\s*AMOUNT|GRAND\s*TOTAL|AMOUNT\s*PAYABLE|NET\s*PAYABLE)[^\d]{0,25}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)",
-        r"\bTOTAL\b[^\d]{0,15}(\d{3,}(?:\.\d{1,2})?)",
+    total_priority_patterns = [
+        r"\bGRAND\s*TOTAL\b[^\d]{0,25}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{2})",
+        r"\bAMOUNT\s*PAYABLE\b[^\d]{0,25}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{2})",
+        r"\bNET\s*PAYABLE\b[^\d]{0,25}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{2})",
+        r"\bTOTAL\s*₹?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{2})",
+        r"\bTOTAL\s*AMOUNT\b[^\d]{0,25}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{2})",
     ]
     taxable_patterns = [
         r"(?:TAXABLE\s*VALUE|TAXABLE\s*AMOUNT|SUB\s*TOTAL|BASIC\s*AMOUNT)[^\d]{0,20}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)",
     ]
 
     if retry_data.get("Final Amount") in (None, 0):
-        for pattern in total_patterns:
+        for pattern in total_priority_patterns:
             match = re.search(pattern, text)
             if match:
                 retry_data["Final Amount"] = float(match.group(1).replace(",", ""))
@@ -874,18 +891,21 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         data["Confidence"]["Round Off"] = 0.95
         applied_rules.append("ROUND_OFF_CAPTURED")
 
-    final = _extract_labelled_amount(lines, ("GRAND TOTAL",))
-    if final is None:
-        final = _extract_labelled_amount(lines, ("TOTAL AMOUNT",))
-    if final is not None:
-        applied_rules.append("TOTAL_AMOUNT_LABEL_PRIORITY")
+    total_priority_patterns = [
+        ("GRAND_TOTAL_PRIORITY", r"\bGRAND\s*TOTAL\b[^\d]{0,25}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{2})"),
+        ("AMOUNT_PAYABLE_PRIORITY", r"\bAMOUNT\s*PAYABLE\b[^\d]{0,25}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{2})"),
+        ("NET_PAYABLE_PRIORITY", r"\bNET\s*PAYABLE\b[^\d]{0,25}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{2})"),
+        ("TOTAL_RUPEE_PRIORITY", r"\bTOTAL\s*₹?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{2})"),
+        ("TOTAL_AMOUNT_PRIORITY", r"\bTOTAL\s*AMOUNT\b[^\d]{0,25}(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{2})"),
+    ]
 
-    for line in reversed(lines):
-        if re.search(r"\b(GRAND TOTAL|TOTAL AMOUNT|AMOUNT PAYABLE|NET PAYABLE|TOTAL)\b", line):
-            nums = _line_total_candidates(line)
-            if nums:
-                final = nums[-1]
-                break
+    final = None
+    for rule_name, pattern in total_priority_patterns:
+        matched = re.search(pattern, text)
+        if matched:
+            final = float(matched.group(1).replace(",", ""))
+            applied_rules.append(rule_name)
+            break
 
     if final is None:
         for i, line in enumerate(lines):
