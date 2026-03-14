@@ -8,6 +8,12 @@ from word2number import w2n
 
 GSTIN_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
+INVOICE_NUMBER_REGEX = re.compile(
+    r"(?:INVOICE|INV|BILL|DOC|VOUCHER|REFERENCE|REF|S\.?NO|SERIAL)\s*(?:NO|NUMBER)?\s*[:\-]?\s*([A-Z0-9\-/]+)",
+    flags=re.IGNORECASE,
+)
+DATE_REGEX = re.compile(r"\b\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4}\b")
+
 
 def validate_gstin_checksum(gstin: str) -> bool:
     """Validate a 15-character Indian GSTIN using the official Mod 36 checksum."""
@@ -338,7 +344,7 @@ def _extract_priority_invoice_number(text: str) -> str | None:
 
     for pattern in (
         r"INVOICE\s+NUMBER\s*[:\-]\s*([A-Z0-9][A-Z0-9\-/]*)",
-        r"(?:INVOICE|INV|BILL|DOC|VOUCHER|S\.?NO)\s*(?:NO|NUMBER)?\.?\s*[:\-]?\s*([A-Z0-9\-/]+)",
+        INVOICE_NUMBER_REGEX,
     ):
         match = re.search(pattern, text)
         if match:
@@ -350,13 +356,13 @@ def _extract_priority_invoice_number(text: str) -> str | None:
 
 
 def _extract_priority_invoice_date(lines: list[str]) -> str | None:
-    date_pattern = r"\b\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}\b"
+    date_pattern = DATE_REGEX
     for line in lines:
         upper = line.upper()
         if "PRICE IS VALID TILL" in upper or "WARRANTY" in upper:
             continue
         if "PI DATE" in upper or "ORDER REF DATE" in upper:
-            match = re.search(date_pattern, line)
+            match = date_pattern.search(line)
             if match:
                 return match.group()
     return None
@@ -612,7 +618,7 @@ def run_validation_engine(text: str, data: Dict) -> Dict:
 
     if _is_non_gst_invoice(validated):
         validated["Is GST Invoice"] = False
-        validated["Invoice Type"] = "Non-GST Invoice"
+        validated["Invoice Type"] = "Non GST Invoice"
         validated["CGST Amount"] = 0.0
         validated["SGST Amount"] = 0.0
         validated["IGST Amount"] = 0.0
@@ -649,7 +655,7 @@ def run_validation_engine(text: str, data: Dict) -> Dict:
             validated["Final Amount"] = round(float(words_target), 2)
             validated.setdefault("_rules_applied", []).append("CGST_SGST_WORDS_TOTAL_VALIDATION")
 
-    if validated.get("Invoice Type") == "Non-GST Invoice":
+    if validated.get("Invoice Type") in {"Non-GST Invoice", "Non GST Invoice"}:
         validated["Validation"] = "Non GST Invoice"
     else:
         validated["Validation"] = "Verified" if is_valid_math else "Math Mismatch"
@@ -709,7 +715,7 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         data["Confidence"]["GST Number"] = 0.95
 
     inv_patterns = [
-        r"(?:INVOICE|INV|BILL|DOC|VOUCHER|S\.?NO)\s*(?:NO|NUMBER)?\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-/]*\d(?:[A-Z0-9\-/]*))",
+        INVOICE_NUMBER_REGEX,
         r"\b(\d{3,8}/\d{2}-\d{2})\b",
     ]
     if not data.get("Invoice Number"):
@@ -730,7 +736,7 @@ def _extract_invoice_fields_regex(text: str) -> dict:
         applied_rules.append("PI_OR_ORDER_REF_DATE_PRIORITY")
 
     date_patterns = [
-        r"\b\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}\b",
+        DATE_REGEX,
         r"\b\d{1,2}\s+[A-Z]{3,9}\s+\d{2,4}\b",
         r"\b\d{1,2}-[A-Z]{3}-\d{2,4}\b",
     ]
@@ -740,7 +746,7 @@ def _extract_invoice_fields_regex(text: str) -> dict:
             if "PRICE IS VALID TILL" in upper or "WARRANTY" in upper:
                 continue
             for pat in date_patterns:
-                m = re.search(pat, line)
+                m = pat.search(line) if hasattr(pat, "search") else re.search(pat, line)
                 if m:
                     data["Invoice Date"] = m.group()
                     data["Confidence"]["Invoice Date"] = 0.95
