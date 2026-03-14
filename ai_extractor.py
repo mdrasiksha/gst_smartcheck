@@ -514,6 +514,94 @@ def _find_larger_total_candidate(lines: list[str], minimum: float) -> float | No
     return None
 
 
+def extract_sections(text: str) -> Dict[str, str]:
+    lines = normalize_text(text).split("\n")
+
+    def _find_anchor(start: int, anchors: tuple[str, ...], min_hits: int = 1) -> int | None:
+        for idx in range(start, len(lines)):
+            upper = lines[idx].upper()
+            hits = sum(1 for anchor in anchors if anchor in upper)
+            if hits >= min_hits:
+                return idx
+        return None
+
+    item_start = _find_anchor(0, ("DESCRIPTION", "HSN", "QTY", "RATE", "AMOUNT"), min_hits=2)
+    tax_start = _find_anchor(item_start or 0, ("CGST", "SGST", "IGST"), min_hits=1)
+    total_start = _find_anchor(
+        tax_start or item_start or 0,
+        ("GRAND TOTAL", "AMOUNT PAYABLE", "TOTAL"),
+        min_hits=1,
+    )
+
+    header_end = item_start if item_start is not None else len(lines)
+    item_end = tax_start if tax_start is not None else (total_start if total_start is not None else len(lines))
+    tax_end = total_start if total_start is not None else len(lines)
+
+    sections = {
+        "HEADER": "\n".join(lines[:header_end]).strip(),
+        "ITEM_TABLE": "\n".join(lines[item_start:item_end]).strip() if item_start is not None else "",
+        "TAX_BLOCK": "\n".join(lines[tax_start:tax_end]).strip() if tax_start is not None else "",
+        "TOTAL_BLOCK": "\n".join(lines[total_start:]).strip() if total_start is not None else "",
+    }
+    return sections
+
+
+def parse_item_table(section: str) -> Dict:
+    items = []
+    total = 0.0
+
+    for raw_line in section.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        upper = line.upper()
+        if any(stop in upper for stop in ("DESCRIPTION", "SUB TOTAL", "TOTAL TAXABLE", "CGST", "SGST", "IGST", "TOTAL")):
+            continue
+
+        amounts = _line_total_candidates(line)
+        if not amounts:
+            continue
+
+        amount = round(amounts[-1], 2)
+        hsn_match = re.search(r"\b\d{4,8}\b", line)
+        description = re.sub(r"\b\d+(?:,\d{3})*(?:\.\d{1,2})?\b", " ", line)
+        description = re.sub(r"\s+", " ", description).strip(" -:")
+
+        items.append(
+            {
+                "hsn_code": hsn_match.group(0) if hsn_match else None,
+                "description": description or None,
+                "amount": amount,
+            }
+        )
+        total += amount
+
+    return {"items": items, "item_total_sum": round(total, 2) if items else None}
+
+
+def parse_tax_block(section: str) -> Dict[str, float | None]:
+    lines = section.split("\n") if section else []
+    return {
+        "CGST Amount": _sum_tax_components(lines, "CGST"),
+        "SGST Amount": _sum_tax_components(lines, "SGST"),
+        "IGST Amount": _sum_tax_components(lines, "IGST"),
+    }
+
+
+def parse_total_block(section: str) -> Dict[str, float | None]:
+    lines = section.split("\n") if section else []
+    taxable = _extract_labelled_amount(lines, ("TAXABLE AMOUNT", "TAXABLE VALUE", "SUB TOTAL", "BASIC AMOUNT"))
+    round_off = _extract_round_off(lines)
+    final = _extract_labelled_amount(lines, ("GRAND TOTAL", "AMOUNT PAYABLE", "FINAL TOTAL", "NET PAYABLE", "TOTAL"))
+
+    return {
+        "Taxable Amount": taxable,
+        "Round Off": round_off,
+        "Final Amount": final,
+    }
+
+
 
 
 def _extract_freight_amount(lines: list[str]) -> float | None:
@@ -620,6 +708,35 @@ def run_validation_engine(text: str, data: Dict) -> Dict:
     validated = dict(data)
     validated.setdefault("Confidence", {})
 
+    sections = extract_sections(text)
+    item_details = parse_item_table(sections.get("ITEM_TABLE", ""))
+    tax_details = parse_tax_block(sections.get("TAX_BLOCK", ""))
+    combined_total_section = "\n".join(part for part in (sections.get("TAX_BLOCK", ""), sections.get("TOTAL_BLOCK", "")) if part)
+    total_details = parse_total_block(combined_total_section)
+
+    for tax_key in ("CGST Amount", "SGST Amount", "IGST Amount"):
+        if validated.get(tax_key) in (None, 0, 0.0) and tax_details.get(tax_key) is not None:
+            validated[tax_key] = tax_details[tax_key]
+            validated["Confidence"][tax_key] = max(validated["Confidence"].get(tax_key, 0.0), 0.88)
+
+    if validated.get("Taxable Amount") in (None, 0, 0.0) and total_details.get("Taxable Amount") is not None:
+        validated["Taxable Amount"] = total_details["Taxable Amount"]
+        validated["Sub Total"] = total_details["Taxable Amount"]
+        validated["Confidence"]["Taxable Amount"] = max(validated["Confidence"].get("Taxable Amount", 0.0), 0.88)
+
+    if total_details.get("Round Off") is not None:
+        validated["Round Off"] = total_details["Round Off"]
+        validated["Confidence"]["Round Off"] = max(validated["Confidence"].get("Round Off", 0.0), 0.85)
+
+    if validated.get("Final Amount") in (None, 0, 0.0) and total_details.get("Final Amount") is not None:
+        validated["Final Amount"] = total_details["Final Amount"]
+        validated["Confidence"]["Final Amount"] = max(validated["Confidence"].get("Final Amount", 0.0), 0.88)
+
+    if validated.get("Taxable Amount") in (None, 0, 0.0) and item_details.get("item_total_sum") is not None:
+        validated["Taxable Amount"] = item_details["item_total_sum"]
+        validated["Sub Total"] = item_details["item_total_sum"]
+        validated["Confidence"]["Taxable Amount"] = max(validated["Confidence"].get("Taxable Amount", 0.0), 0.85)
+
     for key in ("Taxable Amount", "CGST Amount", "SGST Amount", "IGST Amount", "Final Amount"):
         validated["Confidence"].setdefault(key, 0.4 if validated.get(key) is None else 0.7)
 
@@ -665,6 +782,16 @@ def run_validation_engine(text: str, data: Dict) -> Dict:
             math_difference = words_difference
             validated["Final Amount"] = round(float(words_target), 2)
             validated.setdefault("_rules_applied", []).append("CGST_SGST_WORDS_TOTAL_VALIDATION")
+
+    section_item_total = item_details.get("item_total_sum")
+    section_cgst = float(validated.get("CGST Amount") or 0.0)
+    section_sgst = float(validated.get("SGST Amount") or 0.0)
+    section_final = validated.get("Final Amount")
+    if section_item_total is not None and section_final is not None:
+        section_expected = round(float(section_item_total) + section_cgst + section_sgst, 2)
+        if _is_close(section_expected, float(section_final), tolerance=1.0):
+            is_valid_math = True
+            validated.setdefault("_rules_applied", []).append("SECTION_LAYOUT_VALIDATION")
 
     if validated.get("Invoice Type") == "Non-GST Invoice":
         validated["Validation"] = "Non GST Invoice"
