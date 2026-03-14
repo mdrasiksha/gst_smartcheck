@@ -5,31 +5,37 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-from ai_extractor import validate_gstin_checksum
 
 BATCH_COLUMNS = [
-    "Source File Name",
+    "Vendor",
     "Invoice No",
     "Date",
-    "GSTIN",
-    "Taxable Value",
-    "CGST",
-    "SGST",
-    "IGST",
+    "Taxable",
+    "GST",
     "Total",
+    "Source File Name",
     "Validation Status",
     "Confidence Score",
-    "Rules Applied",
-    "Output File",
 ]
 
-NUMERIC_COLUMNS = ["Taxable Value", "CGST", "SGST", "IGST", "Total", "Confidence Score"]
+NUMERIC_COLUMNS = ["Taxable", "GST", "Total", "Confidence Score"]
 
 
 def write_batch_summary(results, output_path):
     rows = []
     for result in results:
-        row = {col: result.get(col) for col in BATCH_COLUMNS}
+        gst_total = sum(float(result.get(key) or 0) for key in ("CGST", "SGST", "IGST"))
+        row = {
+            "Vendor": result.get("Vendor") or result.get("Particulars") or result.get("Party Name"),
+            "Invoice No": result.get("Invoice No"),
+            "Date": result.get("Date"),
+            "Taxable": result.get("Taxable Value"),
+            "GST": gst_total,
+            "Total": result.get("Total"),
+            "Source File Name": result.get("Source File Name"),
+            "Validation Status": result.get("Validation Status"),
+            "Confidence Score": result.get("Confidence Score"),
+        }
         rows.append(row)
 
     df = pd.DataFrame(rows, columns=BATCH_COLUMNS)
@@ -82,7 +88,6 @@ def write_batch_summary(results, output_path):
             cell.border = thin_border
 
     date_col = BATCH_COLUMNS.index("Date") + 1
-    gstin_col = BATCH_COLUMNS.index("GSTIN") + 1
     status_col = BATCH_COLUMNS.index("Validation Status") + 1
 
     for row_idx in range(data_row, ws.max_row + 1):
@@ -90,11 +95,7 @@ def write_batch_summary(results, output_path):
         if date_cell.value:
             date_cell.number_format = "DD-MMM-YYYY"
 
-        gst_cell = ws.cell(row=row_idx, column=gstin_col)
         status_cell = ws.cell(row=row_idx, column=status_col)
-
-        if gst_cell.value and not validate_gstin_checksum(str(gst_cell.value)):
-            gst_cell.fill = error_fill
 
         if str(status_cell.value).strip().lower() == "success":
             status_cell.fill = success_fill
@@ -102,18 +103,14 @@ def write_batch_summary(results, output_path):
 
     min_widths = {
         "Source File Name": 28,
+        "Vendor": 24,
         "Invoice No": 12,
         "Date": 14,
-        "GSTIN": 18,
-        "Taxable Value": 14,
-        "CGST": 12,
-        "SGST": 12,
-        "IGST": 12,
+        "Taxable": 14,
+        "GST": 12,
         "Total": 14,
         "Validation Status": 24,
         "Confidence Score": 16,
-        "Rules Applied": 26,
-        "Output File": 24,
     }
 
     for col_idx in range(1, ws.max_column + 1):

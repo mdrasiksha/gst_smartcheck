@@ -264,7 +264,7 @@ async def upload_bulk_invoices(
         headers = {"X-Remaining": str(MAX_FREE - get_usage(email))}
         return FileResponse(
             path=zip_path,
-            filename="bulk_invoice_results.zip",
+            filename="bulk_results.zip",
             media_type="application/zip",
             headers=headers,
         )
