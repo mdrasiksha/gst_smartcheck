@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "gst-smartcheck",
+  "private_key_id": "9638f82ce7c6604c4964afa12dff97cdb9a5c471",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC/W7Cf9pHQWZGy\nd8xzhWtFa9DNRo2ZA9vhsslLnJZGL5Cp0HcsdSF/zZWHwHDDHc1OWeZxSdNxIHa9\n0I6U6JQzqxYqabAZjN7KsGC/SJtY/LR/5oCPU3y57OijU99Oo6FXDw1MYt5I+3ZF\nK36V6b13WZUDckDLb2w1HT69iTyFcYTmfnjtOgakUKSkIJb+sA/P9xSWxoRqQ0Df\nqV5qx4/IvUmoyhrlKHbxWOfinlZQx0yESR1krkEzsSQcsQvuRGR2MciEgFZTzqRo\nZXFYDNxiLICF2J6joBYZykzCELuMXfcNsuBBcN9z9EkR0dNtMUdpYEZOioO2yYdF\nLX3ZYy2VAgMBAAECggEAAhZy/9vFzXscrtDFx0DeYbyCY6rwYon7PSQhNBT6QrvE\nHUYr9q00d1t71SZRVJ+fnMo4TGYcy3AqO3nqBE/hRgsIy9+pTy4NRDLWa1/Uag0f\nvwF5x5aGltSx2Q5SMl5wpS2B3KJ7gFpV+P03fVU2fvXYPVhiwpVtncq644B6y43j\no66tX9nZrW4SBWJ/w6IW7fjeQ4KC1zLFwaAogXXpvDU5aAChsYDoYRTYQWSRPxCl\nhBE6wNwFyJ5F+rYuHODT0/uY4FDUG7gB9knpHRLCGYNF6/tB7mK3eg55bNKEXQWS\nmp3Q3EULpAjc1R2bwxiTjJH6H2JtC0ixqeDhvOvMJQKBgQD4dKV6x11fn4+SErpv\nx6Kc0xxMIs25v0ASR/9JvfmPqARNAqOPPF+E+Zb/f1xJuneuV6ST16Gyqzl8LwaF\nZnzasvQflbg8ZNq+E8xQZKEkoOCKonFMa+Q/6CamqiK5v2+LWmvrmmqyxdVXwfeJ\nvCamyEkjvQRs8ZT+FAwJVAHLewKBgQDFKzMy8vCDeNmdru4n4j+7SkOa2KmJ92n0\nzh4KEfsLLw8OHKYeDNJL1xhu7Srn1yeqzu1ItqmBxawS/QE8CWl6b06J0HQq7Gep\nW3JQ7yuQ/VB1njy+1QpMEiYpY39OOoPbsyB5dJLqxZJHm5mGqh4Wuwn/WdS0aaPn\n3jpMIgLWLwKBgQDBu0LlT9tRGrv6bLwPOR1lJ4AjJehAdA5jstwvBgE4sQxZeDtN\nDwh0SaIiK48stkdoHFLqLPOau8ShPpHZJycn6O5OSpJUFVgzaoCgFzdHtmIf97Zc\nnqxl4IFy56sYJ1u0z5bjKY8VQwmt2kNIlPuWhQny4go3YNCKpdsU0vprTQKBgQCa\n9l0DChUl/3FpkPb0uclFNhT0OpzlJmNMWEMbvw4DuDSo7rNQotsVaDR32kcCeANh\nJ8kugQGwUN/w/JBf0zXnWFvtzLvAkJTYclriaVdgWPdHudocUewJ5anAlcaUgUDp\nB1vamVhu1GEnjo+XW1TSoKY23y9hrDV6IxrGg2SfWQKBgFyO2+QMedAEaIUynhr9\nw5BNcQQmTSvNpwFWkmiGfY1r2IYKqPSbHTt6dlpisZHFGJx63Ol0BDA5Y3OWJyek\n+Ruj3OW78v2h70FP2z+Cr88ZYi7xxlaYi0C3eZeMohEuI/9pjiYFz22HHAxhihpp\nz1+FDlsqaNZZucItTODeDjDa\n-----END PRIVATE KEY-----\n",
+  "client_email": "smartcheck-vision@gst-smartcheck.iam.gserviceaccount.com",
+  "client_id": "112219735070332129076",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/smartcheck-vision%40gst-smartcheck.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
