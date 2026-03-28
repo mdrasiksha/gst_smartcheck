@@ -30,6 +30,45 @@ def _extract_text_with_pypdf(pdf_input: PdfInput) -> str:
     return "\n".join(pages).strip()
 
 
+def _extract_text_with_google_vision(pdf_input: PdfInput) -> str:
+    """
+    OCR using Google Vision API.
+
+    Requires runtime dependencies:
+      - google-cloud-vision
+      - pdf2image
+      - poppler binaries available in PATH
+      - Google credentials configured for Vision API access
+    """
+    from google.cloud import vision
+    from pdf2image import convert_from_bytes, convert_from_path
+
+    if isinstance(pdf_input, bytes):
+        images = convert_from_bytes(pdf_input, dpi=300)
+    else:
+        images = convert_from_path(pdf_input, dpi=300)
+
+    client = vision.ImageAnnotatorClient()
+
+    ocr_pages = []
+    for image in images:
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        image_bytes = buffer.getvalue()
+
+        response = client.text_detection(image=vision.Image(content=image_bytes))
+
+        if response.error.message:
+            raise RuntimeError(response.error.message)
+
+        if response.text_annotations:
+            text = response.text_annotations[0].description or ""
+            if text.strip():
+                ocr_pages.append(text)
+
+    return "\n".join(ocr_pages).strip()
+
+
 def _extract_text_with_ocr(pdf_input: PdfInput) -> str:
     """
     OCR fallback for scanned/image-based PDFs.
@@ -69,15 +108,31 @@ def extract_text_from_pdf(pdf_input: PdfInput, force_ocr: bool = False) -> str:
         if len(direct_text) >= 100:
             return direct_text
 
+    vision_failed = False
+    try:
+        vision_text = _extract_text_with_google_vision(pdf_input)
+        if vision_text:
+            return vision_text
+    except Exception:
+        vision_failed = True
+
     try:
         ocr_text = _extract_text_with_ocr(pdf_input)
     except Exception as exc:
         if direct_text:
             return direct_text
-        raise OCREngineError(
+
+        error_msg = (
             "No extractable text found and OCR fallback failed. "
             "Install/verify Tesseract and Poppler to process scanned PDFs."
-        ) from exc
+        )
+        if vision_failed:
+            error_msg = (
+                "Google Vision OCR failed and Tesseract OCR fallback failed. "
+                "Install/verify Tesseract and Poppler, and verify Google Vision API configuration."
+            )
+
+        raise OCREngineError(error_msg) from exc
 
     if not ocr_text:
         if direct_text:
