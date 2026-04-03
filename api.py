@@ -50,6 +50,21 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
+ALLOWED_INPUT_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}
+
+
+def is_supported_invoice_filename(filename: str) -> bool:
+    _, ext = os.path.splitext((filename or "").lower())
+    return ext in ALLOWED_INPUT_EXTENSIONS
+
+
+def build_storage_input_name(unique_id: str, original_filename: str) -> str:
+    _, ext = os.path.splitext((original_filename or "").lower())
+    if ext not in ALLOWED_INPUT_EXTENSIONS:
+        ext = ".pdf"
+    return f"{unique_id}{ext}"
+
+
 def ensure_xlsx_filename(filename: str) -> str:
     base, ext = os.path.splitext(filename or "")
     if ext.lower() != ".xlsx":
@@ -118,9 +133,15 @@ async def upload_invoice(
         )
 
     original_filename = os.path.basename(file.filename or "")
+    if not is_supported_invoice_filename(original_filename):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Unsupported file type. Upload PDF, PNG, JPG, JPEG, WEBP, TIFF, or BMP."},
+        )
+
     pdf_bytes = await file.read()
     unique_id = str(uuid.uuid4())
-    storage_file_name = f"{unique_id}.pdf"
+    storage_file_name = build_storage_input_name(unique_id, original_filename)
     excel_file_name = ensure_xlsx_filename(f"{unique_id}.xlsx")
     excel_output_path = os.path.join(OUTPUT_FOLDER, excel_file_name)
     xml_file_name = f"{unique_id}.xml"
@@ -214,7 +235,7 @@ async def upload_bulk_invoices(
         run_id = str(uuid.uuid4())
 
         for index, upload_file in enumerate(files):
-            if not upload_file.filename.lower().endswith(".pdf"):
+            if not is_supported_invoice_filename(upload_file.filename):
                 return JSONResponse(
                     status_code=400,
                     content={"error": f"Unsupported file type: {upload_file.filename}"},
@@ -225,7 +246,8 @@ async def upload_bulk_invoices(
             output_path = os.path.join(OUTPUT_FOLDER, ensure_xlsx_filename(f"{file_id}.xlsx"))
 
             pdf_bytes = await upload_file.read()
-            storage_path = upload_invoice_pdf(f"{file_id}.pdf", pdf_bytes)
+            storage_name = build_storage_input_name(file_id, safe_name)
+            storage_path = upload_invoice_pdf(storage_name, pdf_bytes)
             stored_pdf_bytes = download_invoice_pdf(storage_path)
 
             invoice_jobs.append(
