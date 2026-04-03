@@ -479,6 +479,8 @@ def _extract_tax_summary_details(text: str) -> dict:
 def _line_total_candidates(line: str) -> list[float]:
     amounts = []
     upper_line = line.upper()
+    identifier_keywords = ("UDYAM", "MSME", "LUT", "ARN", "IFSC", "ACCOUNT", "GSTIN")
+    line_has_identifier_keyword = any(keyword in upper_line for keyword in identifier_keywords)
     for match in re.finditer(r"\b\d+(?:,\d{3})*(?:\.\d{1,2})?\b", line):
         raw_value = match.group()
         normalized_value = raw_value.replace(",", "")
@@ -498,6 +500,13 @@ def _line_total_candidates(line: str) -> list[float]:
                 continue
 
         if is_address_number(integer_part, context_window):
+            continue
+
+        if (
+            "." not in normalized_value
+            and "," not in raw_value
+            and line_has_identifier_keyword
+        ):
             continue
 
         amounts.append(float(normalized_value))
