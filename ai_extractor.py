@@ -479,12 +479,22 @@ def _extract_tax_summary_details(text: str) -> dict:
 def _line_total_candidates(line: str) -> list[float]:
     amounts = []
     upper_line = line.upper()
-    identifier_keywords = ("UDYAM", "MSME", "LUT", "ARN", "IFSC", "ACCOUNT", "GSTIN")
+    identifier_keywords = ("UDYAM", "MSME", "LUT", "ARN", "IFSC", "ACCOUNT", "GSTIN", "A/C", "POLICY", "CHEQUE", "REFERENCE", "CODE", "BANK")
     line_has_identifier_keyword = any(keyword in upper_line for keyword in identifier_keywords)
     for match in re.finditer(r"\b\d+(?:,\d{3})*(?:\.\d{1,2})?\b", line):
         raw_value = match.group()
         normalized_value = raw_value.replace(",", "")
         integer_part = normalized_value.split(".", 1)[0]
+
+        prev_char = line[match.start() - 1] if match.start() > 0 else ""
+        next_char = line[match.end()] if match.end() < len(line) else ""
+
+        # Ignore numeric fragments inside dot/hyphen/slash separated identifiers (e.g. 9100.310300, BA0001-9100).
+        if prev_char in ".-/" or next_char in ".-/":
+            if line_has_identifier_keyword:
+                continue
+            if prev_char == "." or next_char == ".":
+                continue
 
         suffix = line[match.end(): match.end() + 10].strip().upper()
         if suffix.startswith("NOS") or suffix.startswith("UNITS") or suffix.startswith("PCS") or suffix.startswith("QTY"):
@@ -508,6 +518,11 @@ def _line_total_candidates(line: str) -> list[float]:
             and line_has_identifier_keyword
         ):
             continue
+
+        if "." not in normalized_value and "," not in raw_value and len(integer_part) >= 7:
+            money_context = upper_line[max(0, match.start() - 20): min(len(upper_line), match.end() + 20)]
+            if not re.search(r"\b(TOTAL|AMOUNT|VALUE|PREMIUM|TAX|GST|PAYABLE|NET|SUB)\b", money_context):
+                continue
 
         amounts.append(float(normalized_value))
     return amounts
