@@ -12,9 +12,6 @@ from ai_extractor import validate_gstin_checksum
 EXCEL_COLUMNS = [
     "Voucher Type",
     "Date",
-    "HSN Code",
-    "Particulars",
-    "Party Name",
     "GSTIN",
     "Taxable Value",
     "CGST",
@@ -68,14 +65,9 @@ def _prepare_row(data, status, source_file_name=None):
     if is_non_gst:
         cgst, sgst, igst = 0, 0, 0
 
-    vendor_name = _first_available(data, ["Vendor Name", "Supplier Name", "Party Name", "Particulars"])
-
     row = {
         "Voucher Type": "Purchase",
         "Date": _normalize_date(_first_available(data, ["Invoice Date", "Date"])),
-        "HSN Code": _first_available(data, ["HSN Code", "HSN"]),
-        "Particulars": vendor_name,
-        "Party Name": vendor_name,
         "GSTIN": str(_first_available(data, ["GST Number", "GSTIN"], default="") or "").upper() or None,
         "Taxable Value": taxable_value,
         "CGST": cgst,
@@ -148,9 +140,6 @@ def write_to_excel(data, status, output_path, source_file_name=None):
     min_widths = {
         "Voucher Type": 14,
         "Date": 14,
-        "HSN Code": 14,
-        "Particulars": 24,
-        "Party Name": 24,
         "GSTIN": 18,
         "Taxable Value": 14,
         "CGST": 12,
