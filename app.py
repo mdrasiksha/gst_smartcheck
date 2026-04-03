@@ -1,9 +1,8 @@
 import streamlit as st
 import os
 import zipfile
-import tempfile
 
-from main import process_invoice
+from main import process_invoice_bytes, process_invoices_bulk
 from license_manager import is_license_valid
 from confidence_utils import confidence_label
 from batch_excel_writer import write_batch_summary
@@ -96,73 +95,60 @@ uploaded_zip = st.file_uploader(
 # ZIP / BATCH MODE
 # =====================================================
 if uploaded_zip:
-    with tempfile.TemporaryDirectory() as tmp:
-        zip_path = os.path.join(tmp, "batch.zip")
+    invoice_jobs = []
+    with zipfile.ZipFile(uploaded_zip) as z:
+        for info in z.infolist():
+            if info.is_dir() or not info.filename.lower().endswith(".pdf"):
+                continue
 
-        with open(zip_path, "wb") as f:
-            f.write(uploaded_zip.getbuffer())
+            file_name = os.path.basename(info.filename) or info.filename
+            output_name = os.path.splitext(file_name)[0] + ".xlsx"
+            invoice_jobs.append({
+                "name": file_name,
+                "pdf_bytes": z.read(info),
+                "output_path": os.path.join("output", output_name),
+            })
 
-        with zipfile.ZipFile(zip_path) as z:
-            z.extractall(tmp)
+    raw_results = process_invoices_bulk(invoice_jobs) if invoice_jobs else []
+    results = [
+        {
+            "Invoice": row.get("Source File Name"),
+            "Status": row.get("Validation Status"),
+            "Final Amount": row.get("Total"),
+            "Rules Applied": row.get("Rules Applied"),
+        }
+        for row in raw_results
+    ]
 
-        results = []
+    st.info(f"📄 Total invoices processed: {len(results)}")
 
-        for root, _, files in os.walk(tmp):
-            for file in files:
-                if file.lower().endswith(".pdf"):
-                    pdf = os.path.join(root, file)
-                    out = os.path.join("output", file.replace(".pdf", ".xlsx"))
+    st.subheader("📦 Batch Processing Summary")
 
-                    try:
-                        data, status = process_invoice(pdf, out, source_file_name=file)
+    if results:
+        st.table(results)
 
-                        results.append({
-                            "Invoice": file,
-                            "Status": status,
-                            "Final Amount": data.get("Final Amount"),
-                            "Rules Applied": ", ".join(data.get("_rules_applied", []))
-                        })
+        batch_output = os.path.join("output", "batch_summary.xlsx")
+        write_batch_summary(results, batch_output)
 
-                    except Exception as e:
-                        results.append({
-                            "Invoice": file,
-                            "Status": "FAILED",
-                            "Final Amount": None,
-                            "Rules Applied": str(e)
-                        })
+        with open(batch_output, "rb") as f:
+            batch_excel_bytes = f.read()
 
-        st.info(f"📄 Total invoices processed: {len(results)}")
-
-        st.subheader("📦 Batch Processing Summary")
-
-        if results:
-            st.table(results)
-
-            batch_output = os.path.join("output", "batch_summary.xlsx")
-            write_batch_summary(results, batch_output)
-
-            with open(batch_output, "rb") as f:
-                batch_excel_bytes = f.read()
-
-            st.download_button(
-                label="⬇ Download Batch Summary (Excel)",
-                data=batch_excel_bytes,
-                file_name="batch_summary.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_batch_summary"
-            )
-        else:
-            st.warning("⚠️ No PDF invoices found inside the ZIP file.")
+        st.download_button(
+            label="⬇ Download Batch Summary (Excel)",
+            data=batch_excel_bytes,
+            file_name="batch_summary.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_batch_summary"
+        )
+    else:
+        st.warning("⚠️ No PDF invoices found inside the ZIP file.")
 
 
 # =====================================================
 # SINGLE INVOICE MODE
 # =====================================================
 if uploaded_file:
-    pdf_path = os.path.join("samples", uploaded_file.name)
-
-    with open(pdf_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+    pdf_bytes = uploaded_file.getvalue()
 
     base_name = os.path.splitext(uploaded_file.name)[0]
     output_file = os.path.join("output", base_name + ".xlsx")
@@ -172,7 +158,7 @@ if uploaded_file:
         st.info("🔍 Reading invoice...")
         progress.progress(30)
 
-        data, status = process_invoice(pdf_path, output_file, source_file_name=uploaded_file.name)
+        data, status = process_invoice_bytes(pdf_bytes, output_file, source_file_name=uploaded_file.name)
 
         progress.progress(80)
         st.info("📊 Generating Excel report...")
