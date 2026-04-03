@@ -8,7 +8,7 @@ from license_manager import is_license_valid
 from confidence_utils import confidence_label
 from batch_excel_writer import write_batch_summary
 
-
+# OCR improvement - test branch
 # -------------------------------
 # Page config (must be first Streamlit call)
 # -------------------------------
