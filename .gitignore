@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# Database
+*.db
+
+# Outputs
+outputs/
+exports/
+
+# Temp / storage
+storage/
+
+# Env
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db

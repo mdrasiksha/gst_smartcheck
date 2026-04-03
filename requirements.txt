@@ -15,3 +15,6 @@ pdfplumber
 pypdf2
 supabase
 word2number==1.1
+word2number
+google-cloud-vision
+pytesseract

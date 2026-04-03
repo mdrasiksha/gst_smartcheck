@@ -1,62 +1,758 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>GST Invoice to Excel - Beta</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmartCheck GST | Invoice PDF to Excel</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
 
-<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+<body class="min-h-screen bg-slate-950 text-slate-100">
+<div class="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top,#1e3a8a,transparent_55%),radial-gradient(circle_at_80%_20%,#0f766e,transparent_40%),radial-gradient(circle_at_20%_80%,#4f46e5,transparent_45%)] opacity-60"></div>
 
-<div class="bg-white p-8 rounded-xl shadow-lg w-full max-w-md">
-
-    <h1 class="text-2xl font-bold text-center mb-2">
-        GST Invoice to Excel
-    </h1>
-
-    <p class="text-center text-gray-600 mb-6">
-        🚀 Beta Version – 10 Free Uploads
-    </p>
-
-    <form id="uploadForm">
-
-        <label class="block mb-2 font-medium">Email</label>
-        <input
-            type="email"
-            id="email"
-            required
-            class="w-full p-2 border rounded mb-4"
-            placeholder="example@gmail.com"
+<header class="mx-auto w-full max-w-6xl px-4 pt-6">
+    <nav class="flex items-center justify-between rounded-2xl border border-white/10 bg-slate-900/70 px-4 py-3 shadow-lg backdrop-blur">
+        <p class="text-sm font-semibold tracking-wide text-slate-100">SmartCheck GST</p>
+        <a
+            id="navGetProButton"
+            href="https://wa.me/918722250407?text=Hi,%20I%27m%20interested%20in%20the%20GST%20SmartCheck%20Pro%20Plan."
+            target="_blank"
+            rel="noopener noreferrer"
+            class="rounded-lg bg-[#25D366] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#1fb85a]"
         >
+            Get Pro
+        </a>
+    </nav>
+</header>
 
-        <label class="block mb-2 font-medium">Upload Invoice (PDF)</label>
-        <input
-            type="file"
-            id="invoiceFile"
-            accept=".pdf"
-            required
-            class="w-full mb-4"
-        >
+<main class="mx-auto flex min-h-screen w-full max-w-6xl flex-col justify-center gap-8 p-4 py-10 lg:flex-row lg:items-stretch lg:gap-10">
+    <section class="rounded-3xl border border-white/10 bg-slate-900/70 p-8 shadow-2xl backdrop-blur lg:w-1/2">
+        <span class="inline-flex items-center rounded-full border border-cyan-400/40 bg-cyan-400/10 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-cyan-300">
+            SmartCheck GST
+        </span>
 
-        <button
-            type="submit"
-            class="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700"
-        >
-            Upload & Convert
-        </button>
-    </form>
+        <h1 class="mt-5 text-3xl font-bold leading-tight text-white sm:text-4xl">
+            Convert GST invoices to Excel or Tally XML in seconds.
+        </h1>
 
-    <p id="statusMessage" class="text-center text-sm mt-4"></p>
+        <p class="mt-4 text-base leading-7 text-slate-300">
+            Upload a PDF invoice and get structured outputs ready for review, reconciliation, filing, and Tally import.
+            Built for finance teams, CAs, and GST operators who need speed with confidence.
+        </p>
 
-    <p class="text-xs text-gray-500 mt-6 text-center">
-        ⚠ Please verify extracted data before GST filing.
-        Files are auto-deleted within 24 hours. We do not share your data
-    </p>
+        <div class="mt-8 grid gap-4 sm:grid-cols-2">
+            <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p class="text-sm font-semibold text-white">⚡ Faster processing</p>
+                <p class="mt-1 text-sm text-slate-300">Automated extraction replaces repetitive manual entry.</p>
+            </div>
+            <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p class="text-sm font-semibold text-white">🔒 Supabase-backed security</p>
+                <p class="mt-1 text-sm text-slate-300">Uploads are handled through secure Supabase storage workflows.</p>
+            </div>
+            <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p class="text-sm font-semibold text-white">✅ GSTIN checksum guardrails</p>
+                <p class="mt-1 text-sm text-slate-300">GSTIN values are accepted only when Mod-36 checksum validation passes.</p>
+            </div>
+            <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p class="text-sm font-semibold text-white">🎁 Free beta quota</p>
+                <p class="mt-1 text-sm text-slate-300">Get 10 free uploads while the product is in beta.</p>
+            </div>
+        </div>
+    </section>
 
+    <section class="rounded-3xl border border-white/15 bg-white p-8 text-slate-900 shadow-2xl lg:w-1/2">
+        <div class="mb-6 flex items-center justify-between gap-4">
+            <div>
+                <p class="text-xs font-semibold uppercase tracking-[0.2em] text-[#4169E1]">Invoice Converter</p>
+                <h2 class="mt-1 text-2xl font-bold">Upload & convert</h2>
+            </div>
+            <span class="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-600">Beta Access</span>
+        </div>
+
+        <form id="uploadForm" novalidate class="space-y-5">
+            <div>
+                <p class="mb-2 block text-sm font-semibold text-slate-700">Processing mode</p>
+                <div class="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1">
+                    <label class="flex cursor-pointer items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-slate-700 transition has-[:checked]:bg-white has-[:checked]:text-[#4169E1] has-[:checked]:shadow-sm">
+                        <input type="radio" name="processingMode" value="single" class="sr-only" checked>
+                        Single PDF
+                    </label>
+                    <label class="flex cursor-pointer items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-slate-700 transition has-[:checked]:bg-white has-[:checked]:text-[#4169E1] has-[:checked]:shadow-sm">
+                        <input type="radio" name="processingMode" value="bulk" class="sr-only">
+                        Bulk PDFs
+                    </label>
+                </div>
+                <p class="mt-2 text-xs text-slate-500">Bulk mode processes files one by one and downloads each Excel output automatically.</p>
+            </div>
+
+            <div>
+                <p class="mb-2 block text-sm font-semibold text-slate-700">Output format</p>
+                <div class="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1">
+                    <label class="flex cursor-pointer items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-slate-700 transition has-[:checked]:bg-white has-[:checked]:text-[#4169E1] has-[:checked]:shadow-sm">
+                        <input type="radio" name="outputFormat" value="xlsx" class="sr-only" checked>
+                        Excel (.xlsx)
+                    </label>
+                    <label class="flex cursor-pointer items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-slate-700 transition has-[:checked]:bg-white has-[:checked]:text-[#4169E1] has-[:checked]:shadow-sm">
+                        <input type="radio" name="outputFormat" value="xml" class="sr-only">
+                        Tally XML
+                    </label>
+                </div>
+                <p class="mt-2 text-xs text-slate-500">Tally XML exports a Sales voucher payload compatible with Tally ERP 9 / Tally Prime.</p>
+            </div>
+
+            <div>
+                <label for="email" class="mb-2 block text-sm font-semibold text-slate-700">Email ID</label>
+                <input
+                    type="email"
+                    id="email"
+                    name="email"
+                    required
+                    autocomplete="email"
+                    class="w-full rounded-xl border border-slate-300 px-4 py-2.5 text-sm shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    placeholder="name@example.com"
+                    aria-describedby="emailHint"
+                >
+                <label for="rememberEmail" class="mt-3 inline-flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-700">
+                    <input
+                        type="checkbox"
+                        id="rememberEmail"
+                        name="rememberEmail"
+                        class="h-4 w-4 rounded border-slate-300 accent-[#4169E1]"
+                    >
+                    <span>Remember me</span>
+                </label>
+                <p id="emailHint" class="mt-2 text-xs text-slate-500">We only use this for upload tracking and support communication.</p>
+            </div>
+
+            <div>
+                <label for="invoiceFile" id="fileLabel" class="mb-2 block text-sm font-semibold text-slate-700">Invoice PDF</label>
+                <div class="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4">
+                    <input
+                        type="file"
+                        id="invoiceFile"
+                        name="invoiceFile"
+                        accept="application/pdf,.pdf"
+                        required
+                        class="w-full cursor-pointer text-sm text-slate-600 file:mr-4 file:rounded-lg file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-slate-700"
+                        aria-describedby="fileHint"
+                    >
+                    <p id="fileHint" class="mt-2 text-xs text-slate-500">PDF only • Maximum file size: 10MB each</p>
+                    <ul id="fileList" class="mt-3 space-y-1 text-xs text-slate-600"></ul>
+                </div>
+            </div>
+
+            <button
+                id="submitButton"
+                type="submit"
+                class="flex w-full items-center justify-center gap-2 rounded-xl bg-[#4169E1] px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-[#4169E1]/30 transition hover:bg-[#3558bd] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 disabled:shadow-none"
+            >
+                <span id="submitSpinner" class="hidden h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"></span>
+                <span id="submitButtonText">Upload & Convert</span>
+            </button>
+            <div class="mt-2 flex justify-end">
+                <button id="reportIssueButton" type="button" class="text-xs font-normal text-blue-600 transition hover:text-blue-700 hover:underline">
+                    Report issue
+                </button>
+            </div>
+        </form>
+
+        <p id="statusMessage" class="mt-4 text-sm" role="status" aria-live="polite"></p>
+
+        <div class="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+            ⚠ Always verify extracted data before GST filing/import. OCR fallback activates automatically for low-text PDFs.
+        </div>
+
+        <div class="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4">
+            <div class="mb-2 flex items-center justify-between">
+                <p class="text-sm font-semibold text-slate-900">Recent Extractions</p>
+                <span id="usageBadge" class="rounded-full bg-[#4169E1]/10 px-3 py-1 text-xs font-semibold text-[#4169E1]">
+                    You have used 0/10 free uploads
+                </span>
+            </div>
+            <p class="text-xs text-slate-600">Track your free quota usage before switching to Pro for unlimited extraction.</p>
+        </div>
+    </section>
+</main>
+
+<section class="mx-auto w-full max-w-6xl px-4 pb-12">
+    <div class="rounded-3xl border border-white/10 bg-slate-900/70 p-6 shadow-2xl backdrop-blur">
+        <h3 class="text-2xl font-bold text-white">Pricing</h3>
+        <p class="mt-2 text-sm text-slate-300">Choose the plan that fits your extraction volume.</p>
+        <div class="mt-5 grid gap-4 md:grid-cols-2">
+            <article class="rounded-2xl border border-white/10 bg-white/5 p-5">
+                <p class="text-lg font-semibold text-white">Free</p>
+                <p class="mt-2 text-sm text-slate-300">10 Invoices/mo, includes Excel + Tally XML.</p>
+            </article>
+            <article class="rounded-2xl border border-[#25D366]/40 bg-[#25D366]/10 p-5">
+                <p class="text-lg font-semibold text-white">Pro</p>
+                <p class="mt-2 text-sm text-slate-100">Unlimited Invoices, Tally XML Export, and Priority Support.</p>
+                <a
+                    id="pricingProButton"
+                    href="https://wa.me/918722250407?text=Hi,%20I%27m%20interested%20in%20the%20GST%20SmartCheck%20Pro%20Plan."
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="mt-4 inline-flex rounded-lg bg-[#25D366] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#1fb85a]"
+                >
+                    Get Pro on WhatsApp
+                </a>
+            </article>
+        </div>
+    </div>
+</section>
+
+<div id="successModal" class="fixed inset-0 z-20 hidden items-center justify-center bg-slate-900/60 p-4">
+    <div class="w-full max-w-md rounded-2xl bg-white p-6 text-slate-900 shadow-2xl">
+        <div class="flex items-center justify-between">
+            <h3 class="text-lg font-bold">Extraction Complete</h3>
+            <button id="closeSuccessModal" type="button" class="text-xl leading-none text-slate-500">&times;</button>
+        </div>
+        <p id="successModalText" class="mt-3 text-sm text-slate-700"></p>
+        <div id="verifiedPill" class="mt-4 hidden items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-600">
+            <span>✅</span>
+            <span>Verified: GSTIN checksum passed</span>
+        </div>
+        <button id="tallyLockedButton" type="button" class="mt-4 w-full rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100">🔒 Export Tally XML</button>
+        <p id="tallyLockedMessage" class="mt-2 hidden text-xs text-slate-600">
+            Tally XML is a Pro Feature. Would you like to upgrade?
+            <a href="https://wa.me/918722250407?text=Hi,%20I%27m%20interested%20in%20the%20GST%20SmartCheck%20Pro%20Plan." target="_blank" rel="noopener noreferrer" class="font-semibold text-[#25D366] underline">Chat on WhatsApp</a>
+        </p>
+        <div class="mt-6 flex gap-3">
+            <button id="modalGetProButton" type="button" class="flex-1 rounded-lg bg-[#25D366] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#1fb85a]">Get Pro</button>
+            <button id="modalDoneButton" type="button" class="flex-1 rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100">Done</button>
+        </div>
+    </div>
 </div>
 
-<script src="./script.js"></script>
+<div id="limitReachedModal" class="fixed inset-0 z-30 hidden items-center justify-center bg-slate-900/70 p-4">
+    <div class="w-full max-w-md rounded-2xl bg-white p-6 text-slate-900 shadow-2xl">
+        <h3 class="text-lg font-bold">Upgrade to Pro</h3>
+        <p class="mt-2 text-sm text-slate-700">Your current plan cannot process this request. Upgrade to Pro for unlimited access.</p>
+        <div class="mt-5 flex gap-3">
+            <button id="limitWhatsappButton" type="button" class="flex-1 rounded-lg bg-[#25D366] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#1fb85a]">Chat with Developer for Unlimited Access</button>
+            <button id="closeLimitModalButton" type="button" class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700">Close</button>
+        </div>
+    </div>
+</div>
 
+<script>
+(() => {
+    const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+    const MAX_BULK_FILES = 20;
+    const FREE_UPLOAD_LIMIT = 10;
+    const BASE_URL = "https://gst-smartcheck-docker.onrender.com";
+    const uploadEndpoint = `${BASE_URL}/upload`;
+    const waitlistLink = "https://wa.me/918722250407?text=Hi,%20I%27m%20interested%20in%20the%20GST%20SmartCheck%20Pro%20Plan.";
+
+    const form = document.getElementById("uploadForm");
+    const emailInput = document.getElementById("email");
+    const rememberEmailCheckbox = document.getElementById("rememberEmail");
+    const fileInput = document.getElementById("invoiceFile");
+    const fileLabel = document.getElementById("fileLabel");
+    const fileList = document.getElementById("fileList");
+    const modeInputs = document.querySelectorAll('input[name="processingMode"]');
+    const outputFormatInputs = document.querySelectorAll('input[name="outputFormat"]');
+    const submitButton = document.getElementById("submitButton");
+    const submitButtonText = document.getElementById("submitButtonText");
+    const submitSpinner = document.getElementById("submitSpinner");
+    const statusMessage = document.getElementById("statusMessage");
+    const usageBadge = document.getElementById("usageBadge");
+    const successModal = document.getElementById("successModal");
+    const successModalText = document.getElementById("successModalText");
+    const closeSuccessModal = document.getElementById("closeSuccessModal");
+    const modalDoneButton = document.getElementById("modalDoneButton");
+    const verifiedPill = document.getElementById("verifiedPill");
+    const navGetProButton = document.getElementById("navGetProButton");
+    const modalGetProButton = document.getElementById("modalGetProButton");
+    const tallyLockedButton = document.getElementById("tallyLockedButton");
+    const tallyLockedMessage = document.getElementById("tallyLockedMessage");
+    const reportIssueButton = document.getElementById("reportIssueButton");
+    const limitReachedModal = document.getElementById("limitReachedModal");
+    const limitWhatsappButton = document.getElementById("limitWhatsappButton");
+    const closeLimitModalButton = document.getElementById("closeLimitModalButton");
+
+    let usedFreeUploads = 0;
+    let latestExtraction = {
+        invoiceNumber: "N/A",
+        taxableAmount: "N/A",
+        finalAmount: "N/A",
+        validationStatus: "Unknown"
+    };
+
+    const openWaitlist = () => {
+        window.open(waitlistLink, "_blank", "noopener,noreferrer");
+    };
+
+    const readValue = (value, fallback = "N/A") => {
+        if (value === null || value === undefined || value === "") {
+            return fallback;
+        }
+        return value;
+    };
+
+    const reportToWhatsApp = () => {
+        const uiInvoiceNumber = document.getElementById("invoiceNumber")?.textContent?.trim();
+        const uiTaxableAmount = document.getElementById("taxableAmount")?.textContent?.trim();
+        const uiFinalAmount = document.getElementById("finalAmount")?.textContent?.trim();
+        const uiValidationStatus = document.getElementById("validationStatus")?.textContent?.trim();
+
+        const invoiceNumber = readValue(uiInvoiceNumber || latestExtraction.invoiceNumber);
+        const taxableAmount = readValue(uiTaxableAmount || latestExtraction.taxableAmount);
+        const finalAmount = readValue(uiFinalAmount || latestExtraction.finalAmount);
+        const validationStatus = readValue(uiValidationStatus || latestExtraction.validationStatus, "Unknown");
+
+        const message = `Hi, I found an issue with Invoice #${invoiceNumber}. Tool extracted taxable ${taxableAmount} and final ${finalAmount} but it looks wrong. Status: ${validationStatus}. Please help!`;
+        const whatsappUrl = `https://wa.me/918722250407?text=${encodeURIComponent(message)}`;
+        window.open(whatsappUrl, "_blank", "noopener,noreferrer");
+    };
+
+    const downloadBlob = (blob, filename) => {
+        const blobUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = blobUrl;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(blobUrl);
+    };
+
+    const getDownloadFilename = (response, fallback = "tally-export.xml") => {
+        const contentDisposition = response.headers.get("Content-Disposition") || "";
+        const filenameMatch = contentDisposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
+        if (!filenameMatch) {
+            return fallback;
+        }
+
+        return decodeURIComponent(filenameMatch[1]).replace(/[/\\]/g, "_");
+    };
+
+    const downloadTallyXml = async (invoiceId) => {
+        const response = await fetch(`${BASE_URL}/export/tally?invoice_id=${encodeURIComponent(invoiceId)}`);
+        if (!response.ok) {
+            let errorMessage = "Unable to export Tally XML right now.";
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.error || errorMessage;
+            } catch {
+                // Non-JSON error response fallback
+            }
+            throw new Error(errorMessage);
+        }
+
+        const xmlBlob = await response.blob();
+        const filename = getDownloadFilename(response, `invoice-${invoiceId}.xml`);
+        downloadBlob(xmlBlob, filename);
+    };
+
+    const setTallyButtonLockedState = () => {
+        tallyLockedButton.textContent = "🔒 Export Tally XML";
+        tallyLockedButton.classList.remove("border-emerald-200", "text-emerald-700", "hover:bg-emerald-50");
+        tallyLockedButton.classList.add("border-slate-300", "text-slate-700", "hover:bg-slate-100");
+        tallyLockedButton.dataset.locked = "true";
+        tallyLockedButton.removeAttribute("data-invoice-id");
+        tallyLockedMessage.classList.add("hidden");
+    };
+
+    const setTallyButtonUnlockedState = (invoiceId) => {
+        tallyLockedButton.textContent = "Export Tally XML";
+        tallyLockedButton.classList.remove("border-slate-300", "text-slate-700", "hover:bg-slate-100");
+        tallyLockedButton.classList.add("border-emerald-200", "text-emerald-700", "hover:bg-emerald-50");
+        tallyLockedButton.dataset.locked = "false";
+        tallyLockedButton.dataset.invoiceId = invoiceId;
+        tallyLockedMessage.classList.add("hidden");
+    };
+
+    const updateUsageBadge = () => {
+        usageBadge.textContent = `You have used ${Math.min(usedFreeUploads, FREE_UPLOAD_LIMIT)}/${FREE_UPLOAD_LIMIT} free uploads`;
+    };
+
+    const syncUsageFromRemaining = (remaining) => {
+        if (remaining === null || remaining === undefined || Number.isNaN(Number(remaining))) {
+            return;
+        }
+
+        usedFreeUploads = FREE_UPLOAD_LIMIT - Number(remaining);
+        updateUsageBadge();
+    };
+
+    const openSuccessModal = (message, isVerified) => {
+        successModalText.textContent = message;
+        verifiedPill.classList.toggle("hidden", !isVerified);
+        verifiedPill.classList.toggle("flex", isVerified);
+        successModal.classList.remove("hidden");
+        successModal.classList.add("flex");
+    };
+
+    const closeModal = () => {
+        successModal.classList.remove("flex");
+        successModal.classList.add("hidden");
+        tallyLockedMessage.classList.add("hidden");
+    };
+
+    const openLimitReachedModal = () => {
+        limitReachedModal.classList.remove("hidden");
+        limitReachedModal.classList.add("flex");
+    };
+
+    const closeLimitReachedModal = () => {
+        limitReachedModal.classList.remove("flex");
+        limitReachedModal.classList.add("hidden");
+    };
+
+    const getMode = () => document.querySelector('input[name="processingMode"]:checked')?.value || "single";
+    const getOutputFormat = () => document.querySelector('input[name="outputFormat"]:checked')?.value || "xlsx";
+
+    const rememberEmailStorageKey = "smartcheck.rememberedEmail";
+
+    const loadRememberedEmail = () => {
+        const savedEmail = localStorage.getItem(rememberEmailStorageKey);
+        if (!savedEmail) {
+            return;
+        }
+
+        emailInput.value = savedEmail;
+        rememberEmailCheckbox.checked = true;
+    };
+
+    const handleRememberedEmailState = () => {
+        if (!rememberEmailCheckbox.checked) {
+            localStorage.removeItem(rememberEmailStorageKey);
+            return;
+        }
+
+        const email = emailInput.value.trim();
+        if (email) {
+            localStorage.setItem(rememberEmailStorageKey, email);
+        }
+    };
+
+    const setStatus = (message, tone = "info") => {
+        const toneClasses = {
+            info: "text-slate-700",
+            success: "text-emerald-600",
+            error: "text-red-600"
+        };
+
+        statusMessage.classList.remove("text-slate-700", "text-emerald-600", "text-red-600");
+        statusMessage.classList.add(toneClasses[tone] || toneClasses.info);
+        statusMessage.textContent = message;
+    };
+
+    const getSubmitButtonLabel = () => {
+        const format = getOutputFormat();
+        return format === "xml" ? "Upload & Export XML" : "Upload & Convert";
+    };
+
+    const setLoadingState = (isLoading, label = getSubmitButtonLabel()) => {
+        submitButton.disabled = isLoading;
+        submitButtonText.textContent = isLoading ? label : getSubmitButtonLabel();
+        submitSpinner.classList.toggle("hidden", !isLoading);
+    };
+
+    const updateModeUI = () => {
+        const isBulkMode = getMode() === "bulk";
+        fileInput.multiple = isBulkMode;
+        fileLabel.textContent = isBulkMode ? "Invoice PDFs" : "Invoice PDF";
+        fileInput.value = "";
+        fileList.innerHTML = "";
+    };
+
+    const renderSelectedFiles = () => {
+        const files = Array.from(fileInput.files || []);
+        if (!files.length) {
+            fileList.innerHTML = "";
+            return;
+        }
+
+        fileList.innerHTML = files
+            .slice(0, 5)
+            .map((file) => `<li class="rounded-md bg-white px-2 py-1">📄 ${file.name}</li>`)
+            .join("");
+
+        if (files.length > 5) {
+            fileList.innerHTML += `<li class="text-slate-500">+${files.length - 5} more selected</li>`;
+        }
+    };
+
+    const validateInput = () => {
+        const files = Array.from(fileInput.files || []);
+        const isBulkMode = getMode() === "bulk";
+
+        if (!emailInput.checkValidity()) {
+            setStatus("❌ Please enter a valid email ID.", "error");
+            emailInput.focus();
+            return null;
+        }
+
+        if (!files.length) {
+            setStatus(`❌ Please upload ${isBulkMode ? "at least one PDF" : "a PDF invoice"}.`, "error");
+            fileInput.focus();
+            return null;
+        }
+
+        if (isBulkMode && files.length > MAX_BULK_FILES) {
+            setStatus(`❌ You can upload up to ${MAX_BULK_FILES} PDFs at once.`, "error");
+            fileInput.focus();
+            return null;
+        }
+
+        for (const file of files) {
+            const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+            if (!isPdf) {
+                setStatus(`❌ ${file.name} is not a PDF. Only PDF files are supported.`, "error");
+                fileInput.focus();
+                return null;
+            }
+
+            if (file.size > MAX_FILE_SIZE_BYTES) {
+                setStatus(`❌ ${file.name} is too large. Upload PDFs smaller than 10MB each.`, "error");
+                fileInput.focus();
+                return null;
+            }
+        }
+
+        return files;
+    };
+
+    const uploadSingleFile = async (email, file, outputFormat) => {
+        const formData = new FormData();
+        formData.append("email", email);
+        formData.append("file", file);
+        formData.append("output_format", outputFormat || "xlsx");
+
+        const response = await fetch(uploadEndpoint, {
+            method: "POST",
+            body: formData
+        });
+
+        if (!response.ok) {
+            let message = `Upload failed for ${file.name}.`;
+            let action = null;
+            try {
+                const errorData = await response.json();
+                message = errorData.error || message;
+                action = errorData.action || null;
+            } catch {
+                // Non-JSON error response fallback
+            }
+            const error = new Error(message);
+            error.code = response.status;
+            error.action = action;
+            error.remaining = response.headers.get("X-Remaining");
+            throw error;
+        }
+
+        return response;
+    };
+
+    const uploadBulkFiles = async (email, files, outputFormat) => {
+        const formData = new FormData();
+        formData.append("email", email);
+        formData.append("output_format", outputFormat || "xlsx");
+
+        files.forEach((file, index) => {
+            setLoadingState(true, `Processing ${index + 1}/${files.length}...`);
+            formData.append("files", file);
+        });
+
+        const response = await fetch(`${BASE_URL}/upload-bulk`, {
+            method: "POST",
+            body: formData
+        });
+
+        if (!response.ok) {
+            let message = "Bulk upload failed.";
+            let action = null;
+            try {
+                const errorData = await response.json();
+                message = errorData.error || message;
+                action = errorData.action || null;
+            } catch {
+                // Non-JSON error response fallback
+            }
+
+            const error = new Error(message);
+            error.code = response.status;
+            error.action = action;
+            error.remaining = response.headers.get("X-Remaining");
+            throw error;
+        }
+
+        return response;
+    };
+
+    modeInputs.forEach((input) => input.addEventListener("change", updateModeUI));
+    outputFormatInputs.forEach((input) => input.addEventListener("change", () => setLoadingState(false)));
+    fileInput.addEventListener("change", renderSelectedFiles);
+    rememberEmailCheckbox.addEventListener("change", handleRememberedEmailState);
+    emailInput.addEventListener("input", handleRememberedEmailState);
+    loadRememberedEmail();
+    updateModeUI();
+
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        const files = validateInput();
+        if (!files) {
+            return;
+        }
+
+        const mode = getMode();
+        const email = emailInput.value.trim();
+        if (rememberEmailCheckbox.checked) {
+            localStorage.setItem(rememberEmailStorageKey, email);
+        }
+        const outputFormat = getOutputFormat();
+        const outputLabel = outputFormat === "xml" ? "Tally XML" : "Excel";
+
+        setLoadingState(true, mode === "bulk" ? `Processing 1/${files.length}...` : "Processing...");
+        setStatus(mode === "bulk"
+            ? `Uploading ${files.length} invoices and generating summary report...`
+            : `Uploading invoice and preparing ${outputLabel} output...`, "info");
+
+        try {
+            let remaining = null;
+            let successCount = 0;
+            const failedFiles = [];
+            let checksumPassed = false;
+            let lastResult = null;
+
+            if (mode === "bulk") {
+                const bulkResponse = await uploadBulkFiles(email, files, outputFormat);
+                remaining = bulkResponse.headers.get("X-Remaining") || remaining;
+                const bulkBlob = await bulkResponse.blob();
+                downloadBlob(bulkBlob, "bulk_invoice_results.zip");
+                successCount = files.length;
+            } else {
+                for (let index = 0; index < files.length; index += 1) {
+                    const file = files[index];
+                    setLoadingState(true, `Processing ${index + 1}/${files.length}...`);
+
+                    try {
+                        const response = await uploadSingleFile(email, file, outputFormat);
+                        remaining = response.headers.get("X-Remaining") || remaining;
+                        checksumPassed = checksumPassed || response.headers.get("X-GSTIN-Checksum") === "pass";
+                        const contentType = (response.headers.get("Content-Type") || "").toLowerCase();
+
+                        if (contentType.includes("xml")) {
+                            const xmlBlob = await response.blob();
+                            const baseFilename = file.name.replace(/\.pdf$/i, "") || "invoice";
+                            const filename = getDownloadFilename(response, `${baseFilename}.xml`);
+                            downloadBlob(xmlBlob, filename);
+                        } else {
+                            const result = await response.json();
+                            latestExtraction = {
+                                invoiceNumber: readValue(result?.invoice_number || result?.invoiceNumber || result?.invoice_no),
+                                taxableAmount: readValue(result?.taxable_amount || result?.taxableAmount || result?.taxable_value),
+                                finalAmount: readValue(result?.final_amount || result?.finalAmount || result?.total_amount),
+                                validationStatus: readValue(result?.validation_status || result?.validationStatus || "Unknown", "Unknown")
+                            };
+                            const filename = result?.file_url?.split("/").pop();
+                            if (!filename) {
+                                throw new Error(`Missing download URL for ${file.name}.`);
+                            }
+                            window.location.href = `${BASE_URL}/downloads/${filename}`;
+                            lastResult = result;
+                        }
+
+                        successCount += 1;
+                    } catch (error) {
+                        if (error.code === 403 || error.action === "upgrade") {
+                            throw error;
+                        }
+                        failedFiles.push(`${file.name}: ${error.message}`);
+                    }
+                }
+            }
+
+            syncUsageFromRemaining(remaining);
+
+            const remainingMessage = remaining ? ` Free uploads remaining: ${remaining}.` : "";
+
+            if (failedFiles.length === 0) {
+                const completionMessage =
+                    mode === "bulk"
+                        ? `✅ Bulk processing complete. Summary Excel downloaded.${remainingMessage}`
+                        : `✅ Conversion complete. Your ${outputLabel} file is downloading.${remainingMessage}`;
+                setStatus(completionMessage, "success");
+                if (lastResult?.can_download_xml && lastResult?.invoice_id) {
+                    setTallyButtonUnlockedState(lastResult.invoice_id);
+                } else {
+                    setTallyButtonLockedState();
+                }
+                openSuccessModal(completionMessage, checksumPassed);
+            } else if (successCount > 0) {
+                setStatus(
+                    `⚠ Processed ${successCount}/${files.length} files. Some files failed: ${failedFiles.join(" | ")}`,
+                    "error"
+                );
+            } else {
+                throw new Error(failedFiles.join(" | ") || "Upload failed. Please try again.");
+            }
+
+            form.reset();
+            renderSelectedFiles();
+        } catch (error) {
+            const errorMessage = error.message || "Backend not reachable.";
+            syncUsageFromRemaining(error.remaining);
+            setStatus(`❌ ${errorMessage}`, "error");
+
+            const isLimitReached =
+                Number.isFinite(usedFreeUploads) && usedFreeUploads >= FREE_UPLOAD_LIMIT;
+            const shouldPromptUpgrade =
+                error.code === 403 ||
+                error.action === "upgrade" ||
+                isLimitReached ||
+                /limit reached|quota|free uploads/i.test(errorMessage);
+
+            if (shouldPromptUpgrade) {
+                openLimitReachedModal();
+            }
+        } finally {
+            setLoadingState(false);
+        }
+    });
+
+    modalGetProButton.addEventListener("click", openWaitlist);
+    tallyLockedButton.addEventListener("click", async () => {
+        const canDownloadXml = tallyLockedButton.dataset.locked === "false" && tallyLockedButton.dataset.invoiceId;
+
+        if (!canDownloadXml) {
+            tallyLockedMessage.classList.remove("hidden");
+            return;
+        }
+
+        const invoiceId = tallyLockedButton.dataset.invoiceId;
+
+        try {
+            setStatus("Preparing your Tally XML download...", "info");
+            await downloadTallyXml(invoiceId);
+            setStatus("✅ Tally XML download started.", "success");
+            tallyLockedMessage.classList.add("hidden");
+        } catch (error) {
+            setStatus(`❌ ${error.message || "Unable to download Tally XML."}`, "error");
+        }
+    });
+    reportIssueButton.addEventListener("click", reportToWhatsApp);
+    closeSuccessModal.addEventListener("click", closeModal);
+    modalDoneButton.addEventListener("click", closeModal);
+    successModal.addEventListener("click", (event) => {
+        if (event.target === successModal) {
+            closeModal();
+        }
+    });
+    limitWhatsappButton.addEventListener("click", openWaitlist);
+    closeLimitModalButton.addEventListener("click", closeLimitReachedModal);
+    limitReachedModal.addEventListener("click", (event) => {
+        if (event.target === limitReachedModal) {
+            closeLimitReachedModal();
+        }
+    });
+
+    updateUsageBadge();
+    setTallyButtonLockedState();
+})();
+</script>
 
 </body>
 </html>
