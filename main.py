@@ -1,13 +1,13 @@
 import os
 
-from ocr import extract_text_from_pdf
+from ocr import extract_text_from_document
 from extractor_wrapper import extract_with_audit
 from validators import validate_invoice
 from excel_writer import write_to_excel
 
 
 def _extract_data_from_pdf_input(pdf_input, source_file_name=None):
-    text = extract_text_from_pdf(pdf_input)
+    text = extract_text_from_document(pdf_input, source_name=source_file_name)
 
     if not text or len(text.strip()) < 50:
         raise ValueError("OCR failed or insufficient text extracted")
@@ -15,7 +15,7 @@ def _extract_data_from_pdf_input(pdf_input, source_file_name=None):
     data = extract_with_audit(text)
 
     if data.get("Requires Manual Review"):
-        retry_text = extract_text_from_pdf(pdf_input, force_ocr=True)
+        retry_text = extract_text_from_document(pdf_input, force_ocr=True, source_name=source_file_name)
         retry_data = extract_with_audit(retry_text)
         if not retry_data.get("Requires Manual Review"):
             data = retry_data
