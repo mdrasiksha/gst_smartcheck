@@ -1,6 +1,11 @@
 from io import BytesIO
 from typing import Union
 import os
+import shutil
+import subprocess
+import tempfile
+import zipfile
+from xml.etree import ElementTree as ET
 
 from pypdf import PdfReader
 
@@ -8,6 +13,7 @@ from pypdf import PdfReader
 PdfInput = Union[str, bytes]
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"}
+_WORD_EXTENSIONS = {".docx", ".doc"}
 
 
 class PDFExtractionError(Exception):
@@ -72,6 +78,84 @@ def _is_image_input(doc_input: PdfInput, source_name: str | None = None) -> bool
     candidate = source_name or doc_input
     ext = os.path.splitext(candidate)[1].lower()
     return ext in _IMAGE_EXTENSIONS
+
+
+def _looks_like_docx_bytes(file_bytes: bytes) -> bool:
+    if not file_bytes or not file_bytes.startswith(b"PK"):
+        return False
+    try:
+        with zipfile.ZipFile(BytesIO(file_bytes)) as docx_zip:
+            names = set(docx_zip.namelist())
+        return "word/document.xml" in names and "[Content_Types].xml" in names
+    except Exception:
+        return False
+
+
+def _looks_like_doc_bytes(file_bytes: bytes) -> bool:
+    return bool(file_bytes and file_bytes.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"))
+
+
+def _is_word_input(doc_input: PdfInput, source_name: str | None = None) -> bool:
+    if isinstance(doc_input, bytes):
+        return _looks_like_docx_bytes(doc_input) or _looks_like_doc_bytes(doc_input)
+
+    candidate = source_name or doc_input
+    ext = os.path.splitext(candidate)[1].lower()
+    return ext in _WORD_EXTENSIONS
+
+
+def _extract_text_from_docx(doc_input: PdfInput) -> str:
+    if isinstance(doc_input, bytes):
+        docx_stream = BytesIO(doc_input)
+    else:
+        docx_stream = doc_input
+
+    with zipfile.ZipFile(docx_stream) as docx_zip:
+        xml_bytes = docx_zip.read("word/document.xml")
+
+    root = ET.fromstring(xml_bytes)
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    lines: list[str] = []
+
+    for paragraph in root.findall(".//w:p", namespace):
+        chunks = [node.text for node in paragraph.findall(".//w:t", namespace) if node.text]
+        line = "".join(chunks).strip()
+        if line:
+            lines.append(line)
+
+    return "\n".join(lines).strip()
+
+
+def _extract_text_from_doc(doc_input: PdfInput) -> str:
+    parser = shutil.which("antiword") or shutil.which("catdoc")
+    if not parser:
+        raise OCREngineError(
+            "Legacy .doc parsing requires antiword or catdoc. Convert DOC to DOCX or install parser."
+        )
+
+    tmp_path = None
+    try:
+        if isinstance(doc_input, bytes):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".doc") as tmp:
+                tmp.write(doc_input)
+                tmp_path = tmp.name
+            doc_path = tmp_path
+        else:
+            doc_path = doc_input
+
+        result = subprocess.run(
+            [parser, doc_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise OCREngineError((result.stderr or "DOC parser execution failed.").strip())
+        return (result.stdout or "").strip()
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def _extract_text_with_pypdf(pdf_input: PdfInput) -> str:
@@ -290,18 +374,32 @@ def extract_text_from_document(
     source_name: str | None = None,
 ) -> str:
     """
-    Extract text from either PDF or image content.
+    Extract text from PDF, Word, or image content.
 
     Supports:
       - PDF path/bytes (digital + scanned)
+      - DOCX path/bytes
+      - DOC path/bytes (antiword/catdoc required)
       - Image path/bytes (jpg/png/webp/tiff/bmp)
     """
     direct_text = ""
     is_image = _is_image_input(doc_input, source_name=source_name)
+    is_word = _is_word_input(doc_input, source_name=source_name)
 
-    # Byte inputs default to PDF unless image signature is detected.
-    if isinstance(doc_input, bytes) and not is_image and not _looks_like_pdf_bytes(doc_input):
-        raise ValueError("Unsupported file bytes. Expected PDF or image content.")
+    # Byte inputs default to PDF unless a known image/word signature is detected.
+    if isinstance(doc_input, bytes) and not is_image and not is_word and not _looks_like_pdf_bytes(doc_input):
+        raise ValueError("Unsupported file bytes. Expected PDF, Word, or image content.")
+
+    if is_word:
+        source_ext = os.path.splitext((source_name or "") if isinstance(doc_input, bytes) else str(doc_input))[1].lower()
+        if source_ext == ".doc":
+            text = _extract_text_from_doc(doc_input)
+        else:
+            text = _extract_text_from_docx(doc_input)
+
+        if not text:
+            raise ValueError("Word document uploaded but no readable text/tables were found.")
+        return text
 
     if is_image:
         vision_failed = False
