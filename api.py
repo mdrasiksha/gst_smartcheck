@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, Query, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+import io
 import os
 import re
 import time
@@ -64,6 +65,8 @@ ALLOWED_INPUT_MIME_TYPES = {
     "image/webp",
     "image/tiff",
     "image/bmp",
+    "application/zip",
+    "application/x-zip-compressed",
 }
 EXTENSION_TO_MIME_PREFIX = {
     ".pdf": ("application/pdf",),
@@ -80,6 +83,7 @@ EXTENSION_TO_MIME_PREFIX = {
     ".tif": ("image/tiff",),
     ".tiff": ("image/tiff",),
     ".bmp": ("image/bmp",),
+    ".zip": ("application/zip", "application/x-zip-compressed", "application/octet-stream"),
 }
 ALLOWED_INPUT_EXTENSIONS = set(EXTENSION_TO_MIME_PREFIX.keys())
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -103,6 +107,31 @@ def is_supported_mime_for_extension(content_type: str, extension: str) -> bool:
         return False
     allowed_mimes = EXTENSION_TO_MIME_PREFIX.get(extension.lower(), ())
     return content_type.lower() in allowed_mimes
+
+
+
+
+def _is_likely_pdf(file_bytes: bytes) -> bool:
+    return file_bytes.startswith(b"%PDF-")
+
+
+def _extract_pdf_members_from_zip(zip_bytes: bytes, source_name: str) -> list[tuple[str, bytes]]:
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zip_ref:
+            extracted_pdfs: list[tuple[str, bytes]] = []
+            for member in zip_ref.infolist():
+                if member.is_dir():
+                    continue
+                member_name = member.filename or ""
+                if not member_name.lower().endswith(".pdf"):
+                    continue
+                member_bytes = zip_ref.read(member)
+                if not _is_likely_pdf(member_bytes):
+                    continue
+                extracted_pdfs.append((os.path.basename(member_name), member_bytes))
+            return extracted_pdfs
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid ZIP file: {source_name}") from exc
 
 
 def enforce_upload_rate_limit(email: str, extension: str):
@@ -330,21 +359,8 @@ async def upload_bulk_invoices(
 ):
     try:
         usage = get_usage(email)
-        batch_size = len(files)
-
-        if usage + batch_size > MAX_FREE:
-            remaining = max(0, MAX_FREE - usage)
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "error": "Free limit exceeded for bulk upload. Please subscribe.",
-                    "remaining": remaining,
-                    "requested": batch_size,
-                },
-            )
-
-        invoice_jobs = []
         run_id = str(uuid.uuid4())
+        expanded_invoice_jobs: list[dict] = []
 
         for index, upload_file in enumerate(files):
             if not is_supported_invoice_filename(upload_file.filename):
@@ -352,6 +368,7 @@ async def upload_bulk_invoices(
                     status_code=400,
                     content={"error": f"Unsupported file type: {upload_file.filename}"},
                 )
+
             safe_name = os.path.basename(upload_file.filename)
             extension = get_file_extension(safe_name)
             mime_type = (upload_file.content_type or "").lower().strip()
@@ -365,10 +382,8 @@ async def upload_bulk_invoices(
                     status_code=400,
                     content={"error": f"File type mismatch: {safe_name} ({mime_type or 'unknown'})"},
                 )
-            enforce_upload_rate_limit(email, extension)
 
-            file_id = f"{run_id}_{index}"
-            output_path = os.path.join(OUTPUT_FOLDER, ensure_xlsx_filename(f"{file_id}.xlsx"))
+            enforce_upload_rate_limit(email, extension)
 
             file_bytes = await upload_file.read()
             if len(file_bytes) > MAX_UPLOAD_BYTES:
@@ -377,14 +392,68 @@ async def upload_bulk_invoices(
                     content={"error": f"{safe_name} exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit."},
                 )
             ensure_not_infected(file_bytes)
-            storage_name = build_storage_input_name(file_id, safe_name)
-            storage_path = upload_invoice_pdf(storage_name, file_bytes)
-            stored_invoice_bytes = download_invoice_pdf(storage_path)
+
+            if extension == ".zip":
+                extracted_pdfs = _extract_pdf_members_from_zip(file_bytes, safe_name)
+                if not extracted_pdfs:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": f"ZIP contains no readable PDFs: {safe_name}"},
+                    )
+                for member_index, (member_name, member_bytes) in enumerate(extracted_pdfs):
+                    expanded_invoice_jobs.append(
+                        {
+                            "source_name": member_name,
+                            "source_bytes": member_bytes,
+                            "storage_extension": ".pdf",
+                            "job_index": f"{index}_{member_index}",
+                        }
+                    )
+                logger.info(
+                    "invoice_upload_bulk_zip type=%s mime=%s email=%s size=%d extracted=%d",
+                    extension,
+                    mime_type,
+                    email,
+                    len(file_bytes),
+                    len(extracted_pdfs),
+                )
+                continue
+
+            expanded_invoice_jobs.append(
+                {
+                    "source_name": safe_name,
+                    "source_bytes": file_bytes,
+                    "storage_extension": extension,
+                    "job_index": str(index),
+                }
+            )
             logger.info("invoice_upload_bulk type=%s mime=%s email=%s size=%d", extension, mime_type, email, len(file_bytes))
 
+        expanded_job_count = len(expanded_invoice_jobs)
+        if usage + expanded_job_count > MAX_FREE:
+            remaining = max(0, MAX_FREE - usage)
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "Free limit exceeded for bulk upload. Please subscribe.",
+                    "remaining": remaining,
+                    "requested": expanded_job_count,
+                },
+            )
+
+        invoice_jobs = []
+        for item in expanded_invoice_jobs:
+            file_id = f"{run_id}_{item['job_index']}"
+            output_path = os.path.join(OUTPUT_FOLDER, ensure_xlsx_filename(f"{file_id}.xlsx"))
+            source_name = item["source_name"]
+            storage_extension = item["storage_extension"]
+            storage_source_name = f"invoice{storage_extension}"
+            storage_name = build_storage_input_name(file_id, storage_source_name)
+            storage_path = upload_invoice_pdf(storage_name, item["source_bytes"])
+            stored_invoice_bytes = download_invoice_pdf(storage_path)
             invoice_jobs.append(
                 {
-                    "name": safe_name,
+                    "name": source_name,
                     "pdf_bytes": stored_invoice_bytes,
                     "output_path": output_path,
                 }
@@ -392,7 +461,7 @@ async def upload_bulk_invoices(
 
         results = process_invoices_bulk(invoice_jobs)
 
-        for _ in files:
+        for _ in range(expanded_job_count):
             increment_usage(email)
 
         summary_path = os.path.join(OUTPUT_FOLDER, ensure_xlsx_filename(f"{run_id}_batch_summary.xlsx"))
