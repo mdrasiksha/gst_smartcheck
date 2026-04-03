@@ -1233,8 +1233,10 @@ def _extract_with_gemini(text: str) -> Dict:
         method="POST",
     )
 
+    # Keep Gemini fast/fail-fast in bulk paths.
+    gemini_timeout_seconds = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "8"))
     try:
-        with request.urlopen(req, timeout=20) as resp:
+        with request.urlopen(req, timeout=gemini_timeout_seconds) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
     except (error.URLError, TimeoutError, json.JSONDecodeError):
         return {}
@@ -1276,7 +1278,9 @@ def _extract_with_gemini(text: str) -> Dict:
 
 
 def extract_invoice_fields(text: str) -> dict:
-    ai_data = _extract_with_gemini(text)
-    if ai_data:
-        return run_validation_engine(normalize_text(text), ai_data)
+    # Optional fast-mode gate: disable Gemini unless explicitly enabled.
+    if os.getenv("ENABLE_GEMINI", "false").strip().lower() in {"1", "true", "yes", "on"}:
+        ai_data = _extract_with_gemini(text)
+        if ai_data:
+            return run_validation_engine(normalize_text(text), ai_data)
     return _extract_invoice_fields_regex(text)
