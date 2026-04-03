@@ -3,7 +3,7 @@ import os
 import zipfile
 import tempfile
 
-from main import process_invoice
+from main import process_invoice, process_invoices_bulk
 from license_manager import is_license_valid
 from confidence_utils import confidence_label
 from batch_excel_writer import write_batch_summary
@@ -105,31 +105,28 @@ if uploaded_zip:
         with zipfile.ZipFile(zip_path) as z:
             z.extractall(tmp)
 
-        results = []
-
+        invoice_jobs = []
         for root, _, files in os.walk(tmp):
             for file in files:
                 if file.lower().endswith(".pdf"):
                     pdf = os.path.join(root, file)
                     out = os.path.join("output", file.replace(".pdf", ".xlsx"))
+                    invoice_jobs.append({
+                        "name": file,
+                        "pdf_path": pdf,
+                        "output_path": out,
+                    })
 
-                    try:
-                        data, status = process_invoice(pdf, out, source_file_name=file)
-
-                        results.append({
-                            "Invoice": file,
-                            "Status": status,
-                            "Final Amount": data.get("Final Amount"),
-                            "Rules Applied": ", ".join(data.get("_rules_applied", []))
-                        })
-
-                    except Exception as e:
-                        results.append({
-                            "Invoice": file,
-                            "Status": "FAILED",
-                            "Final Amount": None,
-                            "Rules Applied": str(e)
-                        })
+        raw_results = process_invoices_bulk(invoice_jobs) if invoice_jobs else []
+        results = [
+            {
+                "Invoice": row.get("Source File Name"),
+                "Status": row.get("Validation Status"),
+                "Final Amount": row.get("Total"),
+                "Rules Applied": row.get("Rules Applied"),
+            }
+            for row in raw_results
+        ]
 
         st.info(f"📄 Total invoices processed: {len(results)}")
 
