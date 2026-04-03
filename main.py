@@ -55,8 +55,8 @@ def _should_retry_force_ocr(data: dict, text: str) -> bool:
     return final_amount_missing or text_quality_poor or confidence_below_threshold
 
 
-def _extract_data_from_pdf_input(pdf_input, source_file_name=None):
-    text = extract_text_from_document(pdf_input, source_name=source_file_name)
+def _extract_data_from_document_input(document_input, source_file_name=None):
+    text = extract_text_from_document(document_input, source_name=source_file_name)
 
     if not text or len(text.strip()) < 50:
         raise ValueError("OCR failed or insufficient text extracted")
@@ -64,7 +64,7 @@ def _extract_data_from_pdf_input(pdf_input, source_file_name=None):
     data = extract_with_audit(text)
 
     if _should_retry_force_ocr(data, text):
-        retry_text = extract_text_from_document(pdf_input, force_ocr=True, source_name=source_file_name)
+        retry_text = extract_text_from_document(document_input, force_ocr=True, source_name=source_file_name)
         retry_data = extract_with_audit(retry_text)
         if not retry_data.get("Requires Manual Review"):
             data = retry_data
@@ -79,13 +79,13 @@ def _extract_data_from_pdf_input(pdf_input, source_file_name=None):
 
 def process_invoice(pdf_path, output_path, source_file_name=None):
     resolved_source_file_name = source_file_name or pdf_path
-    data, status = _extract_data_from_pdf_input(pdf_path, source_file_name=resolved_source_file_name)
+    data, status = _extract_data_from_document_input(pdf_path, source_file_name=resolved_source_file_name)
     write_to_excel(data, status, output_path, source_file_name=resolved_source_file_name)
     return data, status
 
 
 def process_invoice_bytes(pdf_bytes, output_path, source_file_name=None):
-    data, status = _extract_data_from_pdf_input(pdf_bytes, source_file_name=source_file_name)
+    data, status = _extract_data_from_document_input(pdf_bytes, source_file_name=source_file_name)
     write_to_excel(data, status, output_path, source_file_name=source_file_name)
     return data, status
 

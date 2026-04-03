@@ -6,6 +6,12 @@ import re
 import time
 import uuid
 import zipfile
+import logging
+import shutil
+import subprocess
+import tempfile
+from collections import defaultdict, deque
+from io import BytesIO
 
 from pypdf.errors import PdfReadError
 
@@ -50,12 +56,124 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-ALLOWED_INPUT_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}
+ALLOWED_INPUT_MIME_TYPES = {
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/tiff",
+    "image/bmp",
+    "application/zip",
+    "application/x-zip-compressed",
+}
+EXTENSION_TO_MIME_PREFIX = {
+    ".pdf": ("application/pdf",),
+    ".doc": ("application/msword", "application/octet-stream"),
+    ".docx": (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/zip",
+        "application/octet-stream",
+    ),
+    ".png": ("image/png",),
+    ".jpg": ("image/jpeg",),
+    ".jpeg": ("image/jpeg",),
+    ".webp": ("image/webp",),
+    ".tif": ("image/tiff",),
+    ".tiff": ("image/tiff",),
+    ".bmp": ("image/bmp",),
+}
+ALLOWED_INPUT_EXTENSIONS = set(EXTENSION_TO_MIME_PREFIX.keys())
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_UPLOADS_PER_MINUTE_PER_TYPE = 30
+REQUEST_WINDOW_SECONDS = 60
+RATE_WINDOW = defaultdict(deque)
+logger = logging.getLogger("invoice_upload")
 
 
 def is_supported_invoice_filename(filename: str) -> bool:
     _, ext = os.path.splitext((filename or "").lower())
     return ext in ALLOWED_INPUT_EXTENSIONS
+
+
+def get_file_extension(filename: str) -> str:
+    return os.path.splitext((filename or "").lower())[1]
+
+
+def is_supported_mime_for_extension(content_type: str, extension: str) -> bool:
+    if not content_type:
+        return False
+    allowed_mimes = EXTENSION_TO_MIME_PREFIX.get(extension.lower(), ())
+    return content_type.lower() in allowed_mimes
+
+
+def enforce_upload_rate_limit(email: str, extension: str):
+    now = time.time()
+    key = (email.lower().strip(), extension.lower().strip())
+    bucket = RATE_WINDOW[key]
+    while bucket and now - bucket[0] > REQUEST_WINDOW_SECONDS:
+        bucket.popleft()
+    if len(bucket) >= MAX_UPLOADS_PER_MINUTE_PER_TYPE:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many {extension} uploads. Please retry in a minute.",
+        )
+    bucket.append(now)
+
+
+def ensure_not_infected(file_bytes: bytes):
+    eicar_marker = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+    if eicar_marker in file_bytes:
+        raise HTTPException(status_code=400, detail="Upload blocked by virus scan.")
+
+    scanner = shutil.which("clamscan")
+    if not scanner:
+        return
+
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+    try:
+        result = subprocess.run(
+            [scanner, "--no-summary", tmp_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 1:
+            raise HTTPException(status_code=400, detail="Upload blocked by virus scan.")
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def extract_pdf_files_from_zip(zip_bytes: bytes, parent_name: str) -> list[tuple[str, bytes]]:
+    pdf_payloads: list[tuple[str, bytes]] = []
+    try:
+        with zipfile.ZipFile(BytesIO(zip_bytes)) as archive:
+            for member_name in archive.namelist():
+                if member_name.endswith("/") or "__MACOSX/" in member_name:
+                    continue
+                clean_name = os.path.basename(member_name)
+                if not clean_name.lower().endswith(".pdf"):
+                    continue
+                with archive.open(member_name) as pdf_member:
+                    file_bytes = pdf_member.read()
+                if not file_bytes.startswith(b"%PDF-"):
+                    continue
+                derived_name = f"{os.path.splitext(parent_name)[0]}_{clean_name}"
+                pdf_payloads.append((derived_name, file_bytes))
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=400, detail="Invalid ZIP file uploaded.") from exc
+
+    if not pdf_payloads:
+        raise HTTPException(
+            status_code=400,
+            detail="ZIP uploaded but no readable PDF files were found.",
+        )
+    return pdf_payloads
 
 
 def build_storage_input_name(unique_id: str, original_filename: str) -> str:
@@ -97,7 +215,7 @@ async def extraction_exception_handler(request: Request, exc: Exception):
         status_code=400,
         content={
             "success": False,
-            "error": "Unable to process this PDF. Please upload a clear PDF with readable invoice text.",
+            "error": "Unable to process this file. Please upload a supported file with readable invoice text.",
             "details": str(exc),
         },
     )
@@ -133,13 +251,37 @@ async def upload_invoice(
         )
 
     original_filename = os.path.basename(file.filename or "")
+    extension = get_file_extension(original_filename)
+    mime_type = (file.content_type or "").lower().strip()
+
+    if extension == ".docm":
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Macro-enabled Word files (.docm) are not supported."},
+        )
+
     if not is_supported_invoice_filename(original_filename):
         return JSONResponse(
             status_code=400,
-            content={"error": "Unsupported file type. Upload PDF, PNG, JPG, JPEG, WEBP, TIFF, or BMP."},
+            content={"error": "Unsupported file extension. Upload PDF, DOC, DOCX, PNG, JPG, JPEG, WEBP, TIFF, or BMP."},
+        )
+    if mime_type not in ALLOWED_INPUT_MIME_TYPES or not is_supported_mime_for_extension(mime_type, extension):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"File type mismatch. Extension '{extension}' is not valid for MIME '{mime_type or 'unknown'}'."},
         )
 
-    pdf_bytes = await file.read()
+    enforce_upload_rate_limit(email, extension)
+
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"File too large. Maximum supported size is {MAX_UPLOAD_BYTES // (1024 * 1024)}MB."},
+        )
+    ensure_not_infected(file_bytes)
+    logger.info("invoice_upload type=%s mime=%s email=%s size=%d", extension, mime_type, email, len(file_bytes))
+
     unique_id = str(uuid.uuid4())
     storage_file_name = build_storage_input_name(unique_id, original_filename)
     excel_file_name = ensure_xlsx_filename(f"{unique_id}.xlsx")
@@ -148,12 +290,12 @@ async def upload_invoice(
 
     try:
         # 1) Receive bytes -> 2) Extract
-        storage_path = upload_invoice_pdf(storage_file_name, pdf_bytes)
-        stored_pdf_bytes = download_invoice_pdf(storage_path)
+        storage_path = upload_invoice_pdf(storage_file_name, file_bytes)
+        stored_invoice_bytes = download_invoice_pdf(storage_path)
 
         # 3) Write Excel into outputs so it remains downloadable until cleanup
         data, status = process_invoice_bytes(
-            stored_pdf_bytes, excel_output_path, source_file_name=original_filename
+            stored_invoice_bytes, excel_output_path, source_file_name=original_filename
         )
 
         # 4) Upload XLSX output to Supabase only when requested.
@@ -218,8 +360,86 @@ async def upload_bulk_invoices(
 ):
     try:
         usage = get_usage(email)
-        batch_size = len(files)
+        invoice_jobs = []
+        run_id = str(uuid.uuid4())
 
+        processed_index = 0
+        for upload_file in files:
+            safe_name = os.path.basename(upload_file.filename)
+            extension = get_file_extension(safe_name)
+            mime_type = (upload_file.content_type or "").lower().strip()
+            file_bytes = await upload_file.read()
+
+            if len(file_bytes) > MAX_UPLOAD_BYTES:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"{safe_name} exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit."},
+                )
+            ensure_not_infected(file_bytes)
+
+            if extension == ".zip":
+                if mime_type not in {"application/zip", "application/x-zip-compressed", "application/octet-stream"}:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": f"File type mismatch: {safe_name} ({mime_type or 'unknown'})"},
+                    )
+                zip_pdf_files = extract_pdf_files_from_zip(file_bytes, safe_name)
+                for nested_name, nested_bytes in zip_pdf_files:
+                    enforce_upload_rate_limit(email, ".pdf")
+                    file_id = f"{run_id}_{processed_index}"
+                    processed_index += 1
+                    output_path = os.path.join(OUTPUT_FOLDER, ensure_xlsx_filename(f"{file_id}.xlsx"))
+                    storage_name = build_storage_input_name(file_id, nested_name)
+                    storage_path = upload_invoice_pdf(storage_name, nested_bytes)
+                    stored_invoice_bytes = download_invoice_pdf(storage_path)
+                    logger.info("invoice_upload_bulk_zip type=.pdf mime=application/pdf email=%s size=%d", email, len(nested_bytes))
+                    invoice_jobs.append(
+                        {
+                            "name": nested_name,
+                            "pdf_bytes": stored_invoice_bytes,
+                            "output_path": output_path,
+                        }
+                    )
+                continue
+
+            if not is_supported_invoice_filename(upload_file.filename):
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"Unsupported file type: {upload_file.filename}"},
+                )
+            if extension == ".docm":
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"Unsupported macro-enabled file: {safe_name}"},
+                )
+            if mime_type not in ALLOWED_INPUT_MIME_TYPES or not is_supported_mime_for_extension(mime_type, extension):
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"File type mismatch: {safe_name} ({mime_type or 'unknown'})"},
+                )
+            enforce_upload_rate_limit(email, extension)
+
+            file_id = f"{run_id}_{processed_index}"
+            processed_index += 1
+            output_path = os.path.join(OUTPUT_FOLDER, ensure_xlsx_filename(f"{file_id}.xlsx"))
+
+            storage_name = build_storage_input_name(file_id, safe_name)
+            storage_path = upload_invoice_pdf(storage_name, file_bytes)
+            stored_invoice_bytes = download_invoice_pdf(storage_path)
+            logger.info("invoice_upload_bulk type=%s mime=%s email=%s size=%d", extension, mime_type, email, len(file_bytes))
+
+            invoice_jobs.append(
+                {
+                    "name": safe_name,
+                    "pdf_bytes": stored_invoice_bytes,
+                    "output_path": output_path,
+                }
+            )
+
+        if not invoice_jobs:
+            return JSONResponse(status_code=400, content={"error": "No supported invoice files found to process."})
+
+        batch_size = len(invoice_jobs)
         if usage + batch_size > MAX_FREE:
             remaining = max(0, MAX_FREE - usage)
             return JSONResponse(
@@ -231,36 +451,9 @@ async def upload_bulk_invoices(
                 },
             )
 
-        invoice_jobs = []
-        run_id = str(uuid.uuid4())
-
-        for index, upload_file in enumerate(files):
-            if not is_supported_invoice_filename(upload_file.filename):
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": f"Unsupported file type: {upload_file.filename}"},
-                )
-
-            file_id = f"{run_id}_{index}"
-            safe_name = os.path.basename(upload_file.filename)
-            output_path = os.path.join(OUTPUT_FOLDER, ensure_xlsx_filename(f"{file_id}.xlsx"))
-
-            pdf_bytes = await upload_file.read()
-            storage_name = build_storage_input_name(file_id, safe_name)
-            storage_path = upload_invoice_pdf(storage_name, pdf_bytes)
-            stored_pdf_bytes = download_invoice_pdf(storage_path)
-
-            invoice_jobs.append(
-                {
-                    "name": safe_name,
-                    "pdf_bytes": stored_pdf_bytes,
-                    "output_path": output_path,
-                }
-            )
-
         results = process_invoices_bulk(invoice_jobs)
 
-        for _ in files:
+        for _ in invoice_jobs:
             increment_usage(email)
 
         summary_path = os.path.join(OUTPUT_FOLDER, ensure_xlsx_filename(f"{run_id}_batch_summary.xlsx"))
