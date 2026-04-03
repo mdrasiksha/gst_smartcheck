@@ -44,7 +44,7 @@ app.add_middleware(
 init_db()
 
 OUTPUT_FOLDER = "outputs"
-MAX_FREE = 10
+MAX_FREE = 20
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -117,12 +117,6 @@ async def upload_invoice(
             content={"error": "Free limit reached. Join the Waitlist for Pro access.", "remaining": 0},
         )
 
-    if normalized_output_format == "xml" and not pro_user:
-        return JSONResponse(
-            status_code=403,
-            content={"error": "XML requires Pro"},
-        )
-
     original_filename = os.path.basename(file.filename or "")
     pdf_bytes = await file.read()
     unique_id = str(uuid.uuid4())
@@ -178,7 +172,7 @@ async def upload_invoice(
             "success": True,
             "remaining": remaining,
             "usage_count": usage_count,
-            "can_download_xml": pro_user,
+            "can_download_xml": usage_count <= MAX_FREE,
             "is_pro": pro_user,
             "file_url": output_file_url,
             "data_summary": {
