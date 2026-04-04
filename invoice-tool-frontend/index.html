@@ -36,7 +36,7 @@
         </h1>
 
         <p class="mt-4 text-base leading-7 text-slate-300">
-            Upload a PDF invoice and get structured outputs ready for review, reconciliation, filing, and Tally import.
+            Upload a PDF or image invoice and get structured outputs ready for review, reconciliation, filing, and Tally import.
             Built for finance teams, CAs, and GST operators who need speed with confidence.
         </p>
 
@@ -75,7 +75,7 @@
                 <div class="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1">
                     <label class="flex cursor-pointer items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-slate-700 transition has-[:checked]:bg-white has-[:checked]:text-[#4169E1] has-[:checked]:shadow-sm">
                         <input type="radio" name="processingMode" value="single" class="sr-only" checked>
-                        Single PDF
+                        Single Invoice
                     </label>
                     <label class="flex cursor-pointer items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-slate-700 transition has-[:checked]:bg-white has-[:checked]:text-[#4169E1] has-[:checked]:shadow-sm">
                         <input type="radio" name="processingMode" value="bulk" class="sr-only">
@@ -125,18 +125,18 @@
             </div>
 
             <div>
-                <label for="invoiceFile" id="fileLabel" class="mb-2 block text-sm font-semibold text-slate-700">Invoice PDF</label>
+                <label for="invoiceFile" id="fileLabel" class="mb-2 block text-sm font-semibold text-slate-700">Invoice file (PDF/Image)</label>
                 <div class="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4">
                     <input
                         type="file"
                         id="invoiceFile"
                         name="invoiceFile"
-                        accept="application/pdf,.pdf"
+                        accept="application/pdf,image/jpeg,image/png,image/webp,image/tiff,image/bmp,.pdf,.jpg,.jpeg,.png,.webp,.tif,.tiff,.bmp"
                         required
                         class="w-full cursor-pointer text-sm text-slate-600 file:mr-4 file:rounded-lg file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-slate-700"
                         aria-describedby="fileHint"
                     >
-                    <p id="fileHint" class="mt-2 text-xs text-slate-500">PDF only • Maximum file size: 10MB each</p>
+                    <p id="fileHint" class="mt-2 text-xs text-slate-500">PDF/JPG/PNG/WEBP/TIFF/BMP • Maximum file size: 10MB each</p>
                     <ul id="fileList" class="mt-3 space-y-1 text-xs text-slate-600"></ul>
                 </div>
             </div>
