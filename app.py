@@ -81,8 +81,8 @@ with st.sidebar:
 # Upload Inputs
 # -------------------------------
 uploaded_file = st.file_uploader(
-    "📄 Drag & Drop GST Invoice PDF here",
-    type=["pdf"]
+    "📄 Drag & Drop GST Invoice (PDF/Image) here",
+    type=["pdf", "jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"]
 )
 
 uploaded_zip = st.file_uploader(
@@ -148,7 +148,7 @@ if uploaded_zip:
 # SINGLE INVOICE MODE
 # =====================================================
 if uploaded_file:
-    pdf_bytes = uploaded_file.getvalue()
+    document_bytes = uploaded_file.getvalue()
 
     base_name = os.path.splitext(uploaded_file.name)[0]
     output_file = os.path.join("output", base_name + ".xlsx")
@@ -158,7 +158,7 @@ if uploaded_file:
         st.info("🔍 Reading invoice...")
         progress.progress(30)
 
-        data, status = process_invoice_bytes(pdf_bytes, output_file, source_file_name=uploaded_file.name)
+        data, status = process_invoice_bytes(document_bytes, output_file, source_file_name=uploaded_file.name)
 
         progress.progress(80)
         st.info("📊 Generating Excel report...")
