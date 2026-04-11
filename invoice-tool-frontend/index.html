@@ -131,7 +131,7 @@
                         type="file"
                         id="invoiceFile"
                         name="invoiceFile"
-                        accept="application/pdf,image/jpeg,image/png,image/webp,image/tiff,image/bmp,.pdf,.jpg,.jpeg,.png,.webp,.tif,.tiff,.bmp"
+                        accept="application/pdf,image/jpeg,image/png,image/webp,image/tiff,image/bmp,.pdf,.jpg,.jpeg,.png,.webp,.tif,.tiff,.bmp,.zip,application/zip,application/x-zip-compressed"
                         required
                         class="w-full cursor-pointer text-sm text-slate-600 file:mr-4 file:rounded-lg file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-slate-700"
                         aria-describedby="fileHint"
@@ -248,6 +248,7 @@
     const rememberEmailCheckbox = document.getElementById("rememberEmail");
     const fileInput = document.getElementById("invoiceFile");
     const fileLabel = document.getElementById("fileLabel");
+    const fileHint = document.getElementById("fileHint");
     const fileList = document.getElementById("fileList");
     const modeInputs = document.querySelectorAll('input[name="processingMode"]');
     const outputFormatInputs = document.querySelectorAll('input[name="outputFormat"]');
@@ -452,7 +453,13 @@
     const updateModeUI = () => {
         const isBulkMode = getMode() === "bulk";
         fileInput.multiple = isBulkMode;
-        fileLabel.textContent = isBulkMode ? "Invoice PDFs" : "Invoice PDF";
+        fileInput.accept = isBulkMode
+            ? "application/pdf,.pdf,.zip,application/zip,application/x-zip-compressed"
+            : "application/pdf,image/jpeg,image/png,image/webp,image/tiff,image/bmp,.pdf,.jpg,.jpeg,.png,.webp,.tif,.tiff,.bmp";
+        fileLabel.textContent = isBulkMode ? "Invoice PDFs or ZIP" : "Invoice file (PDF/Image)";
+        fileHint.textContent = isBulkMode
+            ? "Upload up to 20 PDFs or a single ZIP containing PDFs • Maximum size: 10MB each file"
+            : "PDF/JPG/PNG/WEBP/TIFF/BMP • Maximum file size: 10MB each";
         fileInput.value = "";
         fileList.innerHTML = "";
     };
@@ -485,27 +492,60 @@
         }
 
         if (!files.length) {
-            setStatus(`❌ Please upload ${isBulkMode ? "at least one PDF" : "a PDF invoice"}.`, "error");
+            setStatus(`❌ Please upload ${isBulkMode ? "PDF files or a ZIP of PDFs" : "a supported invoice file"}.`, "error");
             fileInput.focus();
             return null;
         }
 
         if (isBulkMode && files.length > MAX_BULK_FILES) {
-            setStatus(`❌ You can upload up to ${MAX_BULK_FILES} PDFs at once.`, "error");
+            setStatus(`❌ You can upload up to ${MAX_BULK_FILES} files at once.`, "error");
             fileInput.focus();
             return null;
         }
 
+        if (isBulkMode) {
+            const zipFiles = files.filter((file) => file.type === "application/zip" || file.name.toLowerCase().endsWith(".zip"));
+            const pdfFiles = files.filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
+            const hasUnsupported = zipFiles.length + pdfFiles.length !== files.length;
+
+            if (hasUnsupported) {
+                setStatus("❌ Bulk mode supports only PDF files or a ZIP containing PDFs.", "error");
+                fileInput.focus();
+                return null;
+            }
+
+            if (zipFiles.length > 1) {
+                setStatus("❌ Please upload only one ZIP file at a time in bulk mode.", "error");
+                fileInput.focus();
+                return null;
+            }
+
+            if (zipFiles.length === 1 && pdfFiles.length > 0) {
+                setStatus("❌ Please upload either PDFs or a ZIP file, not both together.", "error");
+                fileInput.focus();
+                return null;
+            }
+        }
+
         for (const file of files) {
-            const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
-            if (!isPdf) {
-                setStatus(`❌ ${file.name} is not a PDF. Only PDF files are supported.`, "error");
+            const lowerName = file.name.toLowerCase();
+            const isPdf = file.type === "application/pdf" || lowerName.endsWith(".pdf");
+            const isZip = file.type === "application/zip" || lowerName.endsWith(".zip");
+
+            if (isBulkMode) {
+                if (!isPdf && !isZip) {
+                    setStatus(`❌ ${file.name} is not supported in bulk mode. Use PDFs or one ZIP file.`, "error");
+                    fileInput.focus();
+                    return null;
+                }
+            } else if (!isPdf) {
+                setStatus(`❌ ${file.name} is not a supported invoice file.`, "error");
                 fileInput.focus();
                 return null;
             }
 
             if (file.size > MAX_FILE_SIZE_BYTES) {
-                setStatus(`❌ ${file.name} is too large. Upload PDFs smaller than 10MB each.`, "error");
+                setStatus(`❌ ${file.name} is too large. Upload files smaller than 10MB each.`, "error");
                 fileInput.focus();
                 return null;
             }
