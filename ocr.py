@@ -271,6 +271,7 @@ def _extract_text_with_ocr(pdf_input: PdfInput, target_pages: list[int] | None =
     import pytesseract
 
     dpi = _env_int("OCR_DPI", 200)
+
     page_numbers = target_pages or [1]
 
     def _ocr_single(page_number: int) -> tuple[int, str]:
@@ -282,7 +283,6 @@ def _extract_text_with_ocr(pdf_input: PdfInput, target_pages: list[int] | None =
             return page_number, ""
         processed_image = _preprocess_if_low_quality(images[0])
         text = pytesseract.image_to_string(processed_image, config=TESSERACT_CONFIG)
-        return page_number, (text or "").strip()
 
     collected: dict[int, str] = {}
     with ThreadPoolExecutor(max_workers=_max_ocr_workers(len(page_numbers))) as executor:
@@ -322,8 +322,12 @@ def _merge_text_candidates(direct_text: str, ocr_text: str) -> str:
     if not ocr_text:
         return direct_text
 
-    # If direct extraction looks healthy and longer, trust it.
-    if len(direct_text) >= 300 and _contains_invoice_anchors(direct_text):
+    # If direct extraction looks healthy and longer, trust it unless OCR has clearly stronger invoice signals.
+    if (
+        len(direct_text) >= 300
+        and _contains_invoice_anchors(direct_text)
+        and not (_has_required_invoice_signals(ocr_text) and not _has_required_invoice_signals(direct_text))
+    ):
         return direct_text
 
     # Hybrid path for mixed quality documents.
