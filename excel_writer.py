@@ -92,22 +92,12 @@ def _prepare_row(data, status, source_file_name=None):
     return frame
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def write_to_excel(data, status, output_path, source_file_name=None):
     df = _prepare_row(data, status, source_file_name=source_file_name)
-    lightweight_mode = _env_bool("EXCEL_LIGHTWEIGHT_MODE", True)
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
-        if lightweight_mode:
-            return True
 
-    wb = load_workbook(output_path, read_only=False)
+    wb = load_workbook(output_path)
     ws = wb.active
 
     header_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")

@@ -1,15 +1,10 @@
 import os
-import time
-import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ocr import extract_text_from_document
 from extractor_wrapper import extract_with_audit
 from validators import validate_invoice
 from excel_writer import write_to_excel
-
-_EXTRACTION_CACHE: dict[str, tuple[dict, str]] = {}
-_CACHE_MAX_SIZE = 256
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -60,48 +55,15 @@ def _should_retry_force_ocr(data: dict, text: str) -> bool:
     return final_amount_missing or text_quality_poor or confidence_below_threshold
 
 
-def _has_required_fields(data: dict) -> bool:
-    return bool(data.get("Invoice Number")) and bool(data.get("Final Amount")) and (
-        bool(data.get("GST Number"))
-        or bool(data.get("CGST Amount"))
-        or bool(data.get("SGST Amount"))
-        or bool(data.get("IGST Amount"))
-    )
-
-
-def _maybe_read_cache(document_input):
-    if not isinstance(document_input, bytes):
-        return None, None
-    digest = hashlib.sha256(document_input).hexdigest()
-    return digest, _EXTRACTION_CACHE.get(digest)
-
-
-def _maybe_store_cache(cache_key: str | None, value: tuple[dict, str]):
-    if not cache_key:
-        return
-    if len(_EXTRACTION_CACHE) >= _CACHE_MAX_SIZE:
-        _EXTRACTION_CACHE.pop(next(iter(_EXTRACTION_CACHE)))
-    _EXTRACTION_CACHE[cache_key] = value
-
-
 def _extract_data_from_document_input(document_input, source_file_name=None):
-    stage_start = time.perf_counter()
-    cache_key, cached = _maybe_read_cache(document_input)
-    if cached is not None:
-        return cached[0].copy(), cached[1]
-
-    pdf_start = time.perf_counter()
     text = extract_text_from_document(document_input, source_name=source_file_name)
-    print(f"[perf] pdf_read_ocr={time.perf_counter() - pdf_start:.3f}s source={source_file_name or 'unknown'}")
 
     if not text or len(text.strip()) < 50:
         raise ValueError("OCR failed or insufficient text extracted")
 
-    extract_start = time.perf_counter()
     data = extract_with_audit(text)
-    print(f"[perf] extraction={time.perf_counter() - extract_start:.3f}s source={source_file_name or 'unknown'}")
 
-    if (not _has_required_fields(data)) and _should_retry_force_ocr(data, text):
+    if _should_retry_force_ocr(data, text):
         retry_text = extract_text_from_document(document_input, force_ocr=True, source_name=source_file_name)
         retry_data = extract_with_audit(retry_text)
         if not retry_data.get("Requires Manual Review"):
@@ -112,29 +74,19 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
     if source_file_name:
         data["Source File Name"] = os.path.basename(source_file_name)
 
-    print(f"[perf] total_pipeline={time.perf_counter() - stage_start:.3f}s source={source_file_name or 'unknown'}")
-    _maybe_store_cache(cache_key, (data.copy(), status))
     return data, status
 
 
 def process_invoice(pdf_path, output_path, source_file_name=None):
     resolved_source_file_name = source_file_name or pdf_path
-    start = time.perf_counter()
     data, status = _extract_data_from_document_input(pdf_path, source_file_name=resolved_source_file_name)
-    excel_start = time.perf_counter()
     write_to_excel(data, status, output_path, source_file_name=resolved_source_file_name)
-    print(f"[perf] excel_generation={time.perf_counter() - excel_start:.3f}s source={resolved_source_file_name}")
-    print(f"[perf] process_invoice_total={time.perf_counter() - start:.3f}s source={resolved_source_file_name}")
     return data, status
 
 
 def process_invoice_bytes(pdf_bytes, output_path, source_file_name=None):
-    start = time.perf_counter()
     data, status = _extract_data_from_document_input(pdf_bytes, source_file_name=source_file_name)
-    excel_start = time.perf_counter()
     write_to_excel(data, status, output_path, source_file_name=source_file_name)
-    print(f"[perf] excel_generation={time.perf_counter() - excel_start:.3f}s source={source_file_name or 'bytes'}")
-    print(f"[perf] process_invoice_total={time.perf_counter() - start:.3f}s source={source_file_name or 'bytes'}")
     return data, status
 
 
