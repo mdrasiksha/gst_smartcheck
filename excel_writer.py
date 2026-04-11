@@ -97,7 +97,7 @@ def write_to_excel(data, status, output_path, source_file_name=None):
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
 
-    wb = load_workbook(output_path)
+    wb = load_workbook(output_path, read_only=False)
     ws = wb.active
 
     header_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")

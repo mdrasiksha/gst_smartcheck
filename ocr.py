@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from xml.etree import ElementTree as ET
 
 from pypdf import PdfReader
@@ -14,6 +15,8 @@ PdfInput = Union[str, bytes]
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"}
 _WORD_EXTENSIONS = {".docx", ".doc"}
+TESSERACT_CONFIG = "--oem 3 --psm 6"
+SMART_OCR_TEXT_THRESHOLD = 200
 
 
 class PDFExtractionError(Exception):
@@ -32,12 +35,21 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _max_ocr_workers(page_count: int) -> int:
+    return max(1, min(page_count, _env_int("OCR_MAX_WORKERS", min(4, os.cpu_count() or 1))))
+
+
 def _count_invoice_anchors(text: str) -> int:
     if not text:
         return 0
     upper = text.upper()
     anchors = ("INVOICE", "GST", "TOTAL", "TAX", "AMOUNT")
     return sum(1 for anchor in anchors if anchor in upper)
+
+
+def _has_required_invoice_signals(text: str) -> bool:
+    upper = (text or "").upper()
+    return all(token in upper for token in ("INVOICE", "GST", "TOTAL"))
 
 
 def _is_strong_ocr_text(text: str) -> bool:
@@ -159,6 +171,11 @@ def _extract_text_from_doc(doc_input: PdfInput) -> str:
 
 
 def _extract_text_with_pypdf(pdf_input: PdfInput) -> str:
+    pages = _extract_page_text_with_pypdf(pdf_input)
+    return "\n".join(page for page in pages if page.strip()).strip()
+
+
+def _extract_page_text_with_pypdf(pdf_input: PdfInput) -> list[str]:
     if isinstance(pdf_input, bytes):
         reader = PdfReader(BytesIO(pdf_input))
     else:
@@ -167,13 +184,12 @@ def _extract_text_with_pypdf(pdf_input: PdfInput) -> str:
     pages = []
     for page in reader.pages:
         page_text = page.extract_text() or ""
-        if page_text.strip():
-            pages.append(page_text)
+        pages.append(page_text.strip())
 
-    return "\n".join(pages).strip()
+    return pages
 
 
-def _extract_text_with_google_vision_pdf(pdf_input: PdfInput) -> str:
+def _extract_text_with_google_vision_pdf(pdf_input: PdfInput, target_pages: list[int] | None = None) -> str:
     """
     OCR PDF pages using Google Vision API.
 
@@ -186,67 +202,28 @@ def _extract_text_with_google_vision_pdf(pdf_input: PdfInput) -> str:
     from google.cloud import vision
     from pdf2image import convert_from_bytes, convert_from_path
 
-    # OCR rendering DPI controls (faster defaults than 300).
-    dpi = _env_int("OCR_DPI", 220)
-    fallback_dpi = _env_int("OCR_DPI_FALLBACK", 200)
-
-    if isinstance(pdf_input, bytes):
-        images = convert_from_bytes(pdf_input, dpi=dpi)
-    else:
-        images = convert_from_path(pdf_input, dpi=dpi)
+    dpi = _env_int("OCR_DPI", 200)
 
     client = vision.ImageAnnotatorClient()
-
-    ocr_pages = []
-    for page_index, image in enumerate(images):
-
+    page_numbers = target_pages or [1]
+    collected: list[str] = []
+    for page_number in page_numbers:
+        if isinstance(pdf_input, bytes):
+            images = convert_from_bytes(pdf_input, dpi=dpi, first_page=page_number, last_page=page_number)
+        else:
+            images = convert_from_path(pdf_input, dpi=dpi, first_page=page_number, last_page=page_number)
+        if not images:
+            continue
         buffer = BytesIO()
-        image.save(buffer, format="PNG")
-        image_bytes = buffer.getvalue()
-
-        response = client.text_detection(image=vision.Image(content=image_bytes))
-
+        images[0].save(buffer, format="PNG")
+        response = client.text_detection(image=vision.Image(content=buffer.getvalue()))
         if response.error.message:
             raise RuntimeError(response.error.message)
-
-        page_text = ""
         if response.text_annotations:
             page_text = (response.text_annotations[0].description or "").strip()
-
-        # If OCR text is weak, retry only this page once at fallback DPI.
-        if (not _is_strong_ocr_text(page_text)) and fallback_dpi != dpi:
-            if isinstance(pdf_input, bytes):
-                fallback_images = convert_from_bytes(
-                    pdf_input,
-                    dpi=fallback_dpi,
-                    first_page=page_index + 1,
-                    last_page=page_index + 1,
-                )
-            else:
-                fallback_images = convert_from_path(
-                    pdf_input,
-                    dpi=fallback_dpi,
-                    first_page=page_index + 1,
-                    last_page=page_index + 1,
-                )
-
-            if fallback_images:
-                fallback_buffer = BytesIO()
-                fallback_images[0].save(fallback_buffer, format="PNG")
-                fallback_response = client.text_detection(
-                    image=vision.Image(content=fallback_buffer.getvalue())
-                )
-                if fallback_response.error.message:
-                    raise RuntimeError(fallback_response.error.message)
-                if fallback_response.text_annotations:
-                    fallback_text = (fallback_response.text_annotations[0].description or "").strip()
-                    if len(fallback_text) > len(page_text):
-                        page_text = fallback_text
-
-        if page_text:
-            ocr_pages.append(page_text)
-
-    return "\n".join(ocr_pages).strip()
+            if page_text:
+                collected.append(page_text)
+    return "\n".join(collected).strip()
 
 
 def _extract_text_with_google_vision_image(image_input: PdfInput) -> str:
@@ -271,7 +248,16 @@ def _extract_text_with_google_vision_image(image_input: PdfInput) -> str:
     return ""
 
 
-def _extract_text_with_ocr(pdf_input: PdfInput) -> str:
+def _preprocess_if_low_quality(image):
+    from PIL import ImageOps, ImageStat
+
+    gray = ImageOps.grayscale(image)
+    if ImageStat.Stat(gray).stddev[0] < _env_int("OCR_LOW_QUALITY_STDDEV", 35):
+        return gray.point(lambda px: 255 if px > 160 else 0)
+    return gray
+
+
+def _extract_text_with_ocr(pdf_input: PdfInput, target_pages: list[int] | None = None) -> str:
     """
     OCR fallback for scanned/image-based PDFs.
 
@@ -284,45 +270,53 @@ def _extract_text_with_ocr(pdf_input: PdfInput) -> str:
     from pdf2image import convert_from_bytes, convert_from_path
     import pytesseract
 
-    # OCR rendering DPI controls (faster defaults than 300).
-    dpi = _env_int("OCR_DPI", 220)
-    fallback_dpi = _env_int("OCR_DPI_FALLBACK", 200)
+    dpi = _env_int("OCR_DPI", 200)
+    fallback_dpi = _env_int("OCR_DPI_FALLBACK", 300)
+    page_numbers = target_pages or [1]
 
-    if isinstance(pdf_input, bytes):
-        images = convert_from_bytes(pdf_input, dpi=dpi)
-    else:
-        images = convert_from_path(pdf_input, dpi=dpi)
+    def _ocr_single(page_number: int) -> tuple[int, str]:
+        if isinstance(pdf_input, bytes):
+            images = convert_from_bytes(pdf_input, dpi=dpi, first_page=page_number, last_page=page_number)
+        else:
+            images = convert_from_path(pdf_input, dpi=dpi, first_page=page_number, last_page=page_number)
+        if not images:
+            return page_number, ""
+        processed_image = _preprocess_if_low_quality(images[0])
+        text = pytesseract.image_to_string(processed_image, config=TESSERACT_CONFIG)
+        text = (text or "").strip()
 
-    ocr_pages = []
-    for page_index, image in enumerate(images):
-        page_text = (pytesseract.image_to_string(image, config="--psm 6") or "").strip()
-
-        # If OCR text is weak, retry only this page once at fallback DPI.
-        if (not _is_strong_ocr_text(page_text)) and fallback_dpi != dpi:
+        if (not _is_strong_ocr_text(text)) and fallback_dpi > dpi:
             if isinstance(pdf_input, bytes):
-                fallback_images = convert_from_bytes(
+                hi_res_images = convert_from_bytes(
                     pdf_input,
                     dpi=fallback_dpi,
-                    first_page=page_index + 1,
-                    last_page=page_index + 1,
+                    first_page=page_number,
+                    last_page=page_number,
                 )
             else:
-                fallback_images = convert_from_path(
+                hi_res_images = convert_from_path(
                     pdf_input,
                     dpi=fallback_dpi,
-                    first_page=page_index + 1,
-                    last_page=page_index + 1,
+                    first_page=page_number,
+                    last_page=page_number,
                 )
+            if hi_res_images:
+                hi_res_processed = _preprocess_if_low_quality(hi_res_images[0])
+                hi_res_text = (
+                    pytesseract.image_to_string(hi_res_processed, config=TESSERACT_CONFIG) or ""
+                ).strip()
+                if len(hi_res_text) > len(text):
+                    text = hi_res_text
+        return page_number, text
 
-            if fallback_images:
-                fallback_text = (pytesseract.image_to_string(fallback_images[0], config="--psm 6") or "").strip()
-                if len(fallback_text) > len(page_text):
-                    page_text = fallback_text
+    collected: dict[int, str] = {}
+    with ThreadPoolExecutor(max_workers=_max_ocr_workers(len(page_numbers))) as executor:
+        for page_number, text in executor.map(_ocr_single, page_numbers):
+            if text:
+                collected[page_number] = text
 
-        if page_text:
-            ocr_pages.append(page_text)
-
-    return "\n".join(ocr_pages).strip()
+    ordered_pages = [collected[idx] for idx in sorted(collected)]
+    return "\n".join(ordered_pages).strip()
 
 
 def _extract_text_with_ocr_image(image_input: PdfInput) -> str:
@@ -335,7 +329,8 @@ def _extract_text_with_ocr_image(image_input: PdfInput) -> str:
     else:
         image = Image.open(image_input)
 
-    text = pytesseract.image_to_string(image, config="--psm 6")
+    image = _preprocess_if_low_quality(image)
+    text = pytesseract.image_to_string(image, config=TESSERACT_CONFIG)
     return (text or "").strip()
 
 
@@ -352,8 +347,12 @@ def _merge_text_candidates(direct_text: str, ocr_text: str) -> str:
     if not ocr_text:
         return direct_text
 
-    # If direct extraction looks healthy and longer, trust it.
-    if len(direct_text) >= 300 and _contains_invoice_anchors(direct_text):
+    # If direct extraction looks healthy and longer, trust it unless OCR has clearly stronger invoice signals.
+    if (
+        len(direct_text) >= 300
+        and _contains_invoice_anchors(direct_text)
+        and not (_has_required_invoice_signals(ocr_text) and not _has_required_invoice_signals(direct_text))
+    ):
         return direct_text
 
     # Hybrid path for mixed quality documents.
@@ -429,16 +428,26 @@ def extract_text_from_document(
     if not force_ocr:
         try:
             direct_text = _extract_text_with_pypdf(doc_input)
+            try:
+                page_text = _extract_page_text_with_pypdf(doc_input)
+            except Exception:
+                page_text = [direct_text] if direct_text else []
         except Exception as exc:
             raise PDFExtractionError("Unable to parse PDF text content.") from exc
 
-        if len(direct_text) >= 250 and _contains_invoice_anchors(direct_text):
+        if len(direct_text) >= SMART_OCR_TEXT_THRESHOLD and _contains_invoice_anchors(direct_text):
             return direct_text
+        target_pages = [
+            idx + 1 for idx, text in enumerate(page_text)
+            if len((text or "").strip()) < SMART_OCR_TEXT_THRESHOLD
+        ] or list(range(1, len(page_text) + 1))
+    else:
+        target_pages = None
 
     vision_failed = False
     ocr_text = ""
     try:
-        vision_text = _extract_text_with_google_vision_pdf(doc_input)
+        vision_text = _extract_text_with_google_vision_pdf(doc_input, target_pages=target_pages)
         if vision_text:
             ocr_text = vision_text
     except Exception:
@@ -447,13 +456,15 @@ def extract_text_from_document(
     # Skip slower Tesseract OCR when Google Vision text is already strong enough.
     if not _is_strong_ocr_text(ocr_text):
         try:
-            tesseract_text = _extract_text_with_ocr(doc_input)
+            tesseract_text = _extract_text_with_ocr(doc_input, target_pages=target_pages)
             if len(tesseract_text) > len(ocr_text):
                 ocr_text = tesseract_text
             elif ocr_text and tesseract_text:
                 ocr_text = f"{ocr_text}\n{tesseract_text}".strip()
             else:
                 ocr_text = tesseract_text or ocr_text
+            if _has_required_invoice_signals(ocr_text):
+                return _merge_text_candidates(direct_text, ocr_text)
         except Exception as exc:
             if direct_text or ocr_text:
                 return _merge_text_candidates(direct_text, ocr_text)
