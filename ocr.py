@@ -271,7 +271,7 @@ def _extract_text_with_ocr(pdf_input: PdfInput, target_pages: list[int] | None =
     import pytesseract
 
     dpi = _env_int("OCR_DPI", 200)
-    fallback_dpi = _env_int("OCR_DPI_FALLBACK", 300)
+
     page_numbers = target_pages or [1]
 
     def _ocr_single(page_number: int) -> tuple[int, str]:
@@ -283,31 +283,6 @@ def _extract_text_with_ocr(pdf_input: PdfInput, target_pages: list[int] | None =
             return page_number, ""
         processed_image = _preprocess_if_low_quality(images[0])
         text = pytesseract.image_to_string(processed_image, config=TESSERACT_CONFIG)
-        text = (text or "").strip()
-
-        if (not _is_strong_ocr_text(text)) and fallback_dpi > dpi:
-            if isinstance(pdf_input, bytes):
-                hi_res_images = convert_from_bytes(
-                    pdf_input,
-                    dpi=fallback_dpi,
-                    first_page=page_number,
-                    last_page=page_number,
-                )
-            else:
-                hi_res_images = convert_from_path(
-                    pdf_input,
-                    dpi=fallback_dpi,
-                    first_page=page_number,
-                    last_page=page_number,
-                )
-            if hi_res_images:
-                hi_res_processed = _preprocess_if_low_quality(hi_res_images[0])
-                hi_res_text = (
-                    pytesseract.image_to_string(hi_res_processed, config=TESSERACT_CONFIG) or ""
-                ).strip()
-                if len(hi_res_text) > len(text):
-                    text = hi_res_text
-        return page_number, text
 
     collected: dict[int, str] = {}
     with ThreadPoolExecutor(max_workers=_max_ocr_workers(len(page_numbers))) as executor:
