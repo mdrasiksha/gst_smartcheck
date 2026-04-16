@@ -27,6 +27,28 @@ EXCEL_COLUMNS = [
 
 NUMERIC_COLUMNS = ["Taxable Value", "CGST", "SGST", "IGST", "Total Amount", "Confidence Score"]
 CURRENCY_COLUMNS = ["Taxable Value", "CGST", "SGST", "IGST", "Total Amount"]
+ALL_INVOICES_COLUMNS = [
+    "File Name",
+    "Invoice Number",
+    "Vendor Name",
+    "GSTIN",
+    "Date",
+    "Taxable Amount",
+    "CGST",
+    "SGST",
+    "IGST",
+    "Total Amount",
+    "Confidence Score",
+]
+LINE_ITEMS_COLUMNS = [
+    "Invoice Number",
+    "Vendor Name",
+    "Line Index",
+    "Description",
+    "Quantity",
+    "Unit Price",
+    "Total Price",
+]
 
 
 def _first_available(data, keys, default=None):
@@ -92,14 +114,114 @@ def _prepare_row(data, status, source_file_name=None):
     return frame
 
 
+def _build_summary_frame(data, source_file_name=None):
+    total_amount = _to_numeric(_first_available(data, ["Final Amount", "Total"]))
+    return pd.DataFrame(
+        [
+            {
+                "Generated Time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "Total Files": 1,
+                "Total Amount": round(total_amount or 0.0, 2),
+            }
+        ]
+    )
+
+
+def _to_numeric(value):
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_all_invoices_frame(data, source_file_name=None):
+    row = {
+        "File Name": os.path.basename(source_file_name or data.get("Source File Name") or ""),
+        "Invoice Number": _first_available(data, ["Invoice Number", "Invoice No"]),
+        "Vendor Name": _first_available(data, ["Vendor Name", "Supplier Name"]),
+        "GSTIN": str(_first_available(data, ["GSTIN", "GST Number"], default="") or "").upper() or None,
+        "Date": _normalize_date(_first_available(data, ["Invoice Date", "Date"])),
+        "Taxable Amount": _to_numeric(_first_available(data, ["Taxable Amount", "Taxable Value"])),
+        "CGST": _to_numeric(_first_available(data, ["CGST Amount", "CGST"])),
+        "SGST": _to_numeric(_first_available(data, ["SGST Amount", "SGST"])),
+        "IGST": _to_numeric(_first_available(data, ["IGST Amount", "IGST"])),
+        "Total Amount": _to_numeric(_first_available(data, ["Final Amount", "Total"])),
+        "Confidence Score": _to_numeric(_extract_confidence_score(data)),
+    }
+    frame = pd.DataFrame([row], columns=ALL_INVOICES_COLUMNS)
+    for col in ["Taxable Amount", "CGST", "SGST", "IGST", "Total Amount", "Confidence Score"]:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    return frame
+
+
+def _line_items_from_data(data):
+    raw_line_items = (
+        data.get("Line Items")
+        or data.get("line_items")
+        or data.get("Items")
+        or []
+    )
+    if not isinstance(raw_line_items, list):
+        raw_line_items = []
+
+    invoice_number = _first_available(data, ["Invoice Number", "Invoice No"])
+    vendor_name = _first_available(data, ["Vendor Name", "Supplier Name"])
+    rows = []
+    for idx, item in enumerate(raw_line_items, start=1):
+        if not isinstance(item, dict):
+            continue
+        qty = _to_numeric(_first_available(item, ["Quantity", "Qty", "quantity"]))
+        unit_price = _to_numeric(_first_available(item, ["Unit Price", "Rate", "unit_price"]))
+        total_price = round((qty or 0.0) * (unit_price or 0.0), 2)
+        rows.append(
+            {
+                "Invoice Number": invoice_number,
+                "Vendor Name": vendor_name,
+                "Line Index": idx,
+                "Description": _first_available(item, ["Description", "Item", "Particulars"], default=""),
+                "Quantity": qty,
+                "Unit Price": unit_price,
+                "Total Price": total_price,
+            }
+        )
+    return rows
+
+
+def _build_line_items_frame(data):
+    rows = _line_items_from_data(data)
+    if not rows:
+        rows = [
+            {
+                "Invoice Number": _first_available(data, ["Invoice Number", "Invoice No"]),
+                "Vendor Name": _first_available(data, ["Vendor Name", "Supplier Name"]),
+                "Line Index": None,
+                "Description": "",
+                "Quantity": None,
+                "Unit Price": None,
+                "Total Price": None,
+            }
+        ]
+    frame = pd.DataFrame(rows, columns=LINE_ITEMS_COLUMNS)
+    for col in ["Quantity", "Unit Price", "Total Price"]:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    return frame
+
+
 def write_to_excel(data, status, output_path, source_file_name=None):
     df = _prepare_row(data, status, source_file_name=source_file_name)
+    summary_df = _build_summary_frame(data, source_file_name=source_file_name)
+    invoices_df = _build_all_invoices_frame(data, source_file_name=source_file_name)
+    line_items_df = _build_line_items_frame(data)
+
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
+        summary_df.to_excel(writer, sheet_name="Summary", index=False)
+        invoices_df.to_excel(writer, sheet_name="All Invoices", index=False)
+        line_items_df.to_excel(writer, sheet_name="Line Items", index=False)
+        df.to_excel(writer, sheet_name="Legacy Export", index=False)
 
     wb = load_workbook(output_path)
-    ws = wb.active
-
     header_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
     verified_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
     mismatch_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
@@ -109,20 +231,23 @@ def write_to_excel(data, status, output_path, source_file_name=None):
         left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin")
     )
 
-    for cell in ws[1]:
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = center_align
-        cell.border = thin_border
+    for ws in wb.worksheets:
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = center_align
+            cell.border = thin_border
 
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+            for cell in row:
+                cell.border = thin_border
+
+    legacy_ws = wb["Legacy Export"]
     validation_col = EXCEL_COLUMNS.index("Validation") + 1
     gst_col = EXCEL_COLUMNS.index("GSTIN") + 1
     currency_col_indexes = [EXCEL_COLUMNS.index(col) + 1 for col in CURRENCY_COLUMNS]
 
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
-        for cell in row:
-            cell.border = thin_border
-
+    for row in legacy_ws.iter_rows(min_row=2, max_row=legacy_ws.max_row):
         for col_idx in currency_col_indexes:
             row[col_idx - 1].number_format = "0.00"
 
@@ -137,7 +262,7 @@ def write_to_excel(data, status, output_path, source_file_name=None):
             if not validate_gstin_checksum(str(gst_cell.value)):
                 gst_cell.fill = mismatch_fill
 
-    min_widths = {
+    min_widths_legacy = {
         "Voucher Type": 14,
         "Date": 14,
         "GSTIN": 18,
@@ -152,16 +277,60 @@ def write_to_excel(data, status, output_path, source_file_name=None):
         "Confidence Score": 16,
         "Validation": 16,
     }
+    min_widths_all = {
+        "File Name": 24,
+        "Invoice Number": 18,
+        "Vendor Name": 24,
+        "GSTIN": 18,
+        "Date": 14,
+        "Taxable Amount": 16,
+        "CGST": 12,
+        "SGST": 12,
+        "IGST": 12,
+        "Total Amount": 16,
+        "Confidence Score": 16,
+    }
+    min_widths_line = {
+        "Invoice Number": 18,
+        "Vendor Name": 24,
+        "Line Index": 12,
+        "Description": 36,
+        "Quantity": 12,
+        "Unit Price": 12,
+        "Total Price": 12,
+    }
 
-    for col_idx in range(1, ws.max_column + 1):
-        max_length = 0
-        header = str(ws.cell(row=1, column=col_idx).value or "")
-        col_letter = ws.cell(row=1, column=col_idx).column_letter
-        for row_idx in range(1, ws.max_row + 1):
-            cell_value = ws.cell(row=row_idx, column=col_idx).value
-            if cell_value is not None:
-                max_length = max(max_length, len(str(cell_value)))
-        ws.column_dimensions[col_letter].width = max(max_length + 3, min_widths.get(header, 12))
+    sheet_min_widths = {
+        "Summary": {"Generated Time": 24, "Total Files": 12, "Total Amount": 14},
+        "All Invoices": min_widths_all,
+        "Line Items": min_widths_line,
+        "Legacy Export": min_widths_legacy,
+    }
+    for ws in wb.worksheets:
+        min_widths = sheet_min_widths.get(ws.title, {})
+        for col_idx in range(1, ws.max_column + 1):
+            max_length = 0
+            header = str(ws.cell(row=1, column=col_idx).value or "")
+            col_letter = ws.cell(row=1, column=col_idx).column_letter
+            for row_idx in range(1, ws.max_row + 1):
+                cell_value = ws.cell(row=row_idx, column=col_idx).value
+                if cell_value is not None:
+                    max_length = max(max_length, len(str(cell_value)))
+            ws.column_dimensions[col_letter].width = max(max_length + 3, min_widths.get(header, 12))
+
+    for ws_name, amount_columns in {
+        "Summary": ["Total Amount"],
+        "All Invoices": ["Taxable Amount", "CGST", "SGST", "IGST", "Total Amount"],
+        "Line Items": ["Unit Price", "Total Price"],
+    }.items():
+        ws = wb[ws_name]
+        header_to_idx = {ws.cell(row=1, column=i).value: i for i in range(1, ws.max_column + 1)}
+        for col in amount_columns:
+            col_idx = header_to_idx.get(col)
+            if not col_idx:
+                continue
+            for row_idx in range(2, ws.max_row + 1):
+                ws.cell(row=row_idx, column=col_idx).number_format = "0.00"
 
     try:
         wb.save(output_path)
