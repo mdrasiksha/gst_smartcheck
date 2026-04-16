@@ -1,11 +1,14 @@
 import os
 import sqlite3
+import uuid
 from datetime import datetime
 
 DB_PATH = "users.db"
 STORAGE_ROOT = "storage"
 INVOICE_BUCKET = os.path.join(STORAGE_ROOT, "invoices")
 OUTPUT_BUCKET = os.path.join(STORAGE_ROOT, "outputs")
+FREE_PLAN_LIMIT = 5
+PRO_PLAN_LIMIT = 1000
 
 
 def _connect():
@@ -21,11 +24,27 @@ def init_db():
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
-            email TEXT PRIMARY KEY,
-            usage_count INTEGER DEFAULT 0
+            id TEXT PRIMARY KEY,
+            email TEXT UNIQUE NOT NULL,
+            is_pro INTEGER NOT NULL DEFAULT 0,
+            usage_count INTEGER NOT NULL DEFAULT 0,
+            max_limit INTEGER NOT NULL DEFAULT 5,
+            created_at TEXT NOT NULL
         )
         """
     )
+    cursor.execute("PRAGMA table_info(users)")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    if "id" not in existing_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN id TEXT")
+    if "is_pro" not in existing_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN is_pro INTEGER NOT NULL DEFAULT 0")
+    if "max_limit" not in existing_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN max_limit INTEGER NOT NULL DEFAULT 5")
+    if "created_at" not in existing_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
+    cursor.execute("UPDATE users SET id = COALESCE(id, lower(hex(randomblob(16))))")
+    cursor.execute("UPDATE users SET created_at = COALESCE(created_at, ?)", (datetime.utcnow().isoformat(),))
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS invoices (
@@ -46,12 +65,8 @@ def init_db():
 
 
 def get_usage(email):
-    conn = _connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT usage_count FROM users WHERE email=?", (email,))
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else 0
+    user = get_user_by_email(email)
+    return int(user["usage_count"]) if user else 0
 
 
 def get_user_stats(email):
@@ -64,12 +79,101 @@ def get_user_stats(email):
 
 
 def increment_usage(email):
+    user = create_or_get_user(email)
+    increment_usage_for_user(user["id"])
+
+
+def _normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
+def create_or_get_user(email: str) -> dict:
+    normalized_email = _normalize_email(email)
+    user = get_user_by_email(normalized_email)
+    if user:
+        return user
+
     conn = _connect()
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO users (email, usage_count) VALUES (?, 0)", (email,))
-    cursor.execute("UPDATE users SET usage_count = usage_count + 1 WHERE email=?", (email,))
+    now = datetime.utcnow().isoformat()
+    user_id = str(uuid.uuid4())
+    cursor.execute(
+        """
+        INSERT INTO users (id, email, is_pro, usage_count, max_limit, created_at)
+        VALUES (?, ?, 0, 0, ?, ?)
+        """,
+        (user_id, normalized_email, FREE_PLAN_LIMIT, now),
+    )
     conn.commit()
     conn.close()
+    return get_user_by_email(normalized_email)
+
+
+def get_user_by_email(email: str) -> dict | None:
+    normalized_email = _normalize_email(email)
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, email, is_pro, usage_count, max_limit, created_at
+        FROM users
+        WHERE email = ?
+        LIMIT 1
+        """,
+        (normalized_email,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_user_by_id(user_id: str) -> dict | None:
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, email, is_pro, usage_count, max_limit, created_at
+        FROM users
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (user_id,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def increment_usage_for_user(user_id: str) -> dict:
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE users SET usage_count = usage_count + 1 WHERE id = ?",
+        (user_id,),
+    )
+    conn.commit()
+    conn.close()
+    return get_user_by_id(user_id)
+
+
+def upgrade_user_to_pro(email: str) -> dict:
+    user = create_or_get_user(email)
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE users
+        SET is_pro = 1, max_limit = ?, usage_count = 0
+        WHERE id = ?
+        """,
+        (PRO_PLAN_LIMIT, user["id"]),
+    )
+    conn.commit()
+    conn.close()
+    return get_user_by_id(user["id"])
 
 
 def upload_invoice_pdf(file_name: str, pdf_bytes: bytes) -> str:

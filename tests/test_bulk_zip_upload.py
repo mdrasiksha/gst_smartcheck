@@ -1,5 +1,6 @@
 import io
 import zipfile
+import uuid
 
 from fastapi.testclient import TestClient
 
@@ -29,8 +30,7 @@ def test_upload_bulk_zip_expands_valid_pdf_members(monkeypatch, tmp_path):
         return rows
 
     monkeypatch.setattr(api, "process_invoices_bulk", fake_process_invoices_bulk)
-    monkeypatch.setattr(api, "get_usage", lambda email: 0)
-    monkeypatch.setattr(api, "increment_usage", lambda email: captured.__setitem__("increments", captured["increments"] + 1))
+    monkeypatch.setattr(api, "increment_usage_for_user", lambda user_id: captured.__setitem__("increments", captured["increments"] + 1) or {"id": user_id, "usage_count": captured["increments"], "max_limit": 5})
     def fake_upload_invoice_pdf(file_name, pdf_bytes):
         path = tmp_path / file_name
         path.write_bytes(pdf_bytes)
@@ -41,6 +41,9 @@ def test_upload_bulk_zip_expands_valid_pdf_members(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "write_batch_summary", lambda results, summary_path: open(summary_path, "wb").write(b"summary"))
 
     client = TestClient(api.app)
+    test_email = f"zip-{uuid.uuid4().hex[:8]}@example.com"
+    auth_resp = client.post("/auth/login", json={"email": test_email})
+    token = auth_resp.json()["token"]
     payload = _build_zip_with_members(
         {
             "invoice1.pdf": b"%PDF-1.7 alpha",
@@ -52,7 +55,7 @@ def test_upload_bulk_zip_expands_valid_pdf_members(monkeypatch, tmp_path):
 
     response = client.post(
         "/upload-bulk",
-        data={"email": "zip@example.com"},
+        headers={"Authorization": f"Bearer {token}"},
         files={"files": ("invoices.zip", payload, "application/zip")},
     )
 
@@ -62,9 +65,13 @@ def test_upload_bulk_zip_expands_valid_pdf_members(monkeypatch, tmp_path):
 
 
 def test_upload_bulk_zip_limit_uses_expanded_pdf_count(monkeypatch):
-    monkeypatch.setattr(api, "get_usage", lambda email: api.MAX_FREE - 1)
-
     client = TestClient(api.app)
+    test_email = f"zip-{uuid.uuid4().hex[:8]}@example.com"
+    auth_resp = client.post("/auth/login", json={"email": test_email})
+    token = auth_resp.json()["token"]
+    user = api.get_user_by_email(test_email)
+    for _ in range(4):
+        api.increment_usage_for_user(user["id"])
     payload = _build_zip_with_members(
         {
             "invoice1.pdf": b"%PDF-1.7 alpha",
@@ -74,7 +81,7 @@ def test_upload_bulk_zip_limit_uses_expanded_pdf_count(monkeypatch):
 
     response = client.post(
         "/upload-bulk",
-        data={"email": "zip@example.com"},
+        headers={"Authorization": f"Bearer {token}"},
         files={"files": ("invoices.zip", payload, "application/zip")},
     )
 

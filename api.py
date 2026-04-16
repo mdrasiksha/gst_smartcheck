@@ -1,11 +1,16 @@
-from fastapi import FastAPI, UploadFile, File, Form, Query, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, Query, Request, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import io
 import os
 import re
 import time
 import uuid
+import json
+import hmac
+import hashlib
+import base64
 import zipfile
 import logging
 import shutil
@@ -17,15 +22,13 @@ from pypdf.errors import PdfReadError
 
 from batch_excel_writer import write_batch_summary
 from excel_writer import write_to_excel
-from access_manager import (
-    get_free_upload_count,
-    increment_free_upload_count,
-    is_pro_user,
-)
 from database import (
     init_db,
-    get_usage,
-    increment_usage,
+    create_or_get_user,
+    get_user_by_email,
+    get_user_by_id,
+    increment_usage_for_user,
+    upgrade_user_to_pro,
     upload_invoice_pdf,
     download_invoice_pdf,
     get_public_invoice_url,
@@ -50,7 +53,6 @@ app.add_middleware(
 init_db()
 
 OUTPUT_FOLDER = "outputs"
-MAX_FREE = 20
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -89,8 +91,71 @@ ALLOWED_INPUT_EXTENSIONS = set(EXTENSION_TO_MIME_PREFIX.keys())
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_UPLOADS_PER_MINUTE_PER_TYPE = 30
 REQUEST_WINDOW_SECONDS = 60
+JWT_EXPIRY_DAYS = 7
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
 RATE_WINDOW = defaultdict(deque)
 logger = logging.getLogger("invoice_upload")
+
+
+class LoginRequest(BaseModel):
+    email: str
+
+
+class UpgradeRequest(BaseModel):
+    email: str
+
+
+def _normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("utf-8")
+
+
+def _b64url_decode(data: str) -> bytes:
+    pad = "=" * ((4 - len(data) % 4) % 4)
+    return base64.urlsafe_b64decode((data + pad).encode("utf-8"))
+
+
+def create_jwt(payload: dict) -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    header_b64 = _b64url_encode(json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+    signature = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    return f"{header_b64}.{payload_b64}.{_b64url_encode(signature)}"
+
+
+def decode_jwt(token: str) -> dict:
+    try:
+        header_b64, payload_b64, signature_b64 = token.split(".")
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid token format.") from exc
+    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+    expected_sig = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    provided_sig = _b64url_decode(signature_b64)
+    if not hmac.compare_digest(expected_sig, provided_sig):
+        raise HTTPException(status_code=401, detail="Invalid token signature.")
+    payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+    if int(payload.get("exp", 0)) < int(time.time()):
+        raise HTTPException(status_code=401, detail="Token has expired.")
+    return payload
+
+
+def get_current_user(request: Request) -> dict:
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token.")
+    token = auth_header.split(" ", 1)[1].strip()
+    payload = decode_jwt(token)
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token payload.")
+    user = get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found for token.")
+    return user
 
 
 def is_supported_invoice_filename(filename: str) -> bool:
@@ -232,22 +297,41 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
+@app.post("/auth/login")
+async def auth_login(payload: LoginRequest):
+    normalized_email = _normalize_email(payload.email)
+    if not normalized_email or "@" not in normalized_email:
+        raise HTTPException(status_code=400, detail="Valid email is required.")
+
+    user = create_or_get_user(normalized_email)
+    exp = int(time.time()) + (JWT_EXPIRY_DAYS * 24 * 60 * 60)
+    token = create_jwt({"sub": user["id"], "email": user["email"], "exp": exp})
+
+    return {
+        "token": token,
+        "email": user["email"],
+        "usage_count": int(user["usage_count"]),
+        "max_limit": int(user["max_limit"]),
+        "is_pro": bool(user["is_pro"]),
+    }
+
+
 @app.post("/upload")
 async def upload_invoice(
     background_tasks: BackgroundTasks,
-    email: str = Form(...),
     file: UploadFile = File(...),
     output_format: str = Form("xlsx"),
+    current_user: dict = Depends(get_current_user),
 ):
     normalized_output_format = (output_format or "xlsx").strip().lower()
-    pro_user = is_pro_user(email)
+    email = current_user["email"]
+    usage = int(current_user["usage_count"])
+    max_limit = int(current_user["max_limit"])
 
-    usage = 0 if pro_user else get_free_upload_count(email)
-
-    if not pro_user and usage >= MAX_FREE:
+    if usage >= max_limit:
         return JSONResponse(
             status_code=403,
-            content={"error": "Free limit reached. Join the Waitlist for Pro access.", "remaining": 0},
+            content={"error": "Limit reached", "upgrade_required": True},
         )
 
     original_filename = os.path.basename(file.filename or "")
@@ -317,13 +401,9 @@ async def upload_invoice(
         invoice_pdf_url = get_public_invoice_url(storage_path)
         save_invoice_metadata(email, data, invoice_pdf_url, status)
 
-        if pro_user:
-            increment_usage(email)
-            usage_count = usage
-            remaining = None
-        else:
-            usage_count = increment_free_upload_count(email)
-            remaining = max(0, MAX_FREE - usage_count)
+        updated_user = increment_usage_for_user(current_user["id"])
+        usage_count = int(updated_user["usage_count"])
+        remaining = max(0, int(updated_user["max_limit"]) - usage_count)
 
         gst_total = (
             (data.get("CGST Amount") or 0)
@@ -343,8 +423,8 @@ async def upload_invoice(
             "success": True,
             "remaining": remaining,
             "usage_count": usage_count,
-            "can_download_xml": usage_count <= MAX_FREE,
-            "is_pro": pro_user,
+            "can_download_xml": usage_count <= int(updated_user["max_limit"]),
+            "is_pro": bool(updated_user["is_pro"]),
             "file_url": output_file_url,
             "data_summary": {
                 "invoice_no": data.get("Invoice Number"),
@@ -367,11 +447,13 @@ async def upload_invoice(
 
 @app.post("/upload-bulk")
 async def upload_bulk_invoices(
-    email: str = Form(...),
     files: list[UploadFile] = File(...),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
-        usage = get_usage(email)
+        email = current_user["email"]
+        usage = int(current_user["usage_count"])
+        max_limit = int(current_user["max_limit"])
         run_id = str(uuid.uuid4())
         expanded_invoice_jobs: list[dict] = []
 
@@ -443,12 +525,13 @@ async def upload_bulk_invoices(
             logger.info("invoice_upload_bulk type=%s mime=%s email=%s size=%d", extension, mime_type, email, len(file_bytes))
 
         expanded_job_count = len(expanded_invoice_jobs)
-        if usage + expanded_job_count > MAX_FREE:
-            remaining = max(0, MAX_FREE - usage)
+        if usage + expanded_job_count > max_limit:
+            remaining = max(0, max_limit - usage)
             return JSONResponse(
                 status_code=403,
                 content={
-                    "error": "Free limit exceeded for bulk upload. Please subscribe.",
+                    "error": "Limit reached",
+                    "upgrade_required": True,
                     "remaining": remaining,
                     "requested": expanded_job_count,
                 },
@@ -474,8 +557,9 @@ async def upload_bulk_invoices(
 
         results = process_invoices_bulk(invoice_jobs)
 
+        updated_user = current_user
         for _ in range(expanded_job_count):
-            increment_usage(email)
+            updated_user = increment_usage_for_user(updated_user["id"])
 
         summary_path = os.path.join(OUTPUT_FOLDER, ensure_xlsx_filename(f"{run_id}_batch_summary.xlsx"))
         write_batch_summary(results, summary_path)
@@ -491,7 +575,7 @@ async def upload_bulk_invoices(
 
         cleanup_old_files()
 
-        headers = {"X-Remaining": str(MAX_FREE - get_usage(email))}
+        headers = {"X-Remaining": str(max(0, int(updated_user["max_limit"]) - int(updated_user["usage_count"])))}
         return FileResponse(
             path=zip_path,
             filename="bulk_results.zip",
@@ -527,18 +611,20 @@ def test():
 
 
 @app.get("/history")
-async def fetch_history(email: str = Query(...), limit: int = Query(10, ge=1, le=25)):
+async def fetch_history(limit: int = Query(10, ge=1, le=25), current_user: dict = Depends(get_current_user)):
+    email = current_user["email"]
     history = get_invoice_history(email, limit=limit)
-    usage_count = get_usage(email)
+    usage_count = int(current_user["usage_count"])
     return {
         "history": history,
         "usage_count": usage_count,
-        "can_download_xml": usage_count <= MAX_FREE,
+        "can_download_xml": usage_count <= int(current_user["max_limit"]),
     }
 
 
 @app.get("/export/tally")
-async def export_tally(invoice_id: str = Query(...)):
+async def export_tally(invoice_id: str = Query(...), current_user: dict = Depends(get_current_user)):
+    del current_user
     row = get_invoice_by_id(invoice_id)
     if not row:
         return JSONResponse(status_code=404, content={"error": "Invoice not found"})
@@ -566,3 +652,36 @@ async def export_tally(invoice_id: str = Query(...)):
 
 
 cleanup_old_files()
+
+
+@app.post("/upgrade")
+async def upgrade_plan(payload: UpgradeRequest, current_user: dict = Depends(get_current_user)):
+    requested_email = _normalize_email(payload.email)
+    if requested_email != current_user["email"]:
+        raise HTTPException(status_code=403, detail="You can only upgrade your own account.")
+    upgraded = upgrade_user_to_pro(requested_email)
+    return {
+        "email": upgraded["email"],
+        "is_pro": bool(upgraded["is_pro"]),
+        "usage_count": int(upgraded["usage_count"]),
+        "max_limit": int(upgraded["max_limit"]),
+    }
+
+
+@app.get("/usage")
+async def usage(current_user: dict = Depends(get_current_user)):
+    refreshed_user = get_user_by_email(current_user["email"])
+    return {
+        "used": int(refreshed_user["usage_count"]),
+        "limit": int(refreshed_user["max_limit"]),
+        "is_pro": bool(refreshed_user["is_pro"]),
+    }
+
+
+@app.post("/create-checkout-session")
+async def create_checkout_session(current_user: dict = Depends(get_current_user)):
+    return {
+        "checkout_url": f"https://payments.example.com/checkout?email={current_user['email']}",
+        "plan": "pro_monthly_inr_299",
+        "amount_inr": 299,
+    }
