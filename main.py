@@ -1,9 +1,9 @@
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from ocr import extract_text_with_confidence_from_document
+from ocr import extract_text_from_document
 from extractor_wrapper import extract_with_audit
-from validators import is_invoice_data_valid, validate_invoice
+from validators import validate_invoice
 from excel_writer import write_to_excel
 
 
@@ -56,48 +56,18 @@ def _should_retry_force_ocr(data: dict, text: str) -> bool:
 
 
 def _extract_data_from_document_input(document_input, source_file_name=None):
-    text, avg_confidence = extract_text_with_confidence_from_document(
-        document_input,
-        source_name=source_file_name,
-    )
+    text = extract_text_from_document(document_input, source_name=source_file_name)
 
     if not text or len(text.strip()) < 50:
         raise ValueError("OCR failed or insufficient text extracted")
 
     data = extract_with_audit(text)
-    extraction_is_valid = is_invoice_data_valid(data)
-    min_ocr_confidence = _env_float("MIN_OCR_CONFIDENCE", 70.0)
-    confidence_is_low = (avg_confidence is not None) and (avg_confidence < min_ocr_confidence)
 
-    should_retry = confidence_is_low or (not extraction_is_valid) or _should_retry_force_ocr(data, text)
-    if should_retry:
-        retry_text, retry_confidence = extract_text_with_confidence_from_document(
-            document_input,
-            force_ocr=True,
-            source_name=source_file_name,
-        )
+    if _should_retry_force_ocr(data, text):
+        retry_text = extract_text_from_document(document_input, force_ocr=True, source_name=source_file_name)
         retry_data = extract_with_audit(retry_text)
-        retry_is_valid = is_invoice_data_valid(retry_data)
-        retry_is_better = (
-            (not extraction_is_valid and retry_is_valid)
-            or (
-                retry_confidence is not None and
-                (avg_confidence is None or retry_confidence >= avg_confidence)
-            )
-        )
-        if retry_is_better:
+        if not retry_data.get("Requires Manual Review"):
             data = retry_data
-            extraction_is_valid = retry_is_valid
-            avg_confidence = retry_confidence
-
-    manual_review = (
-        bool(data.get("Requires Manual Review"))
-        or (avg_confidence is not None and avg_confidence < min_ocr_confidence)
-        or not extraction_is_valid
-    )
-    data["Requires Manual Review"] = manual_review
-    data["requires_manual_review"] = manual_review
-    data["confidence_score"] = round(avg_confidence, 2) if avg_confidence is not None else None
 
     status = validate_invoice(data)
 

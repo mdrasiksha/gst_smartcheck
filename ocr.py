@@ -271,7 +271,7 @@ def _extract_text_with_google_vision_image(image_input: PdfInput) -> str:
     return ""
 
 
-def _extract_text_with_ocr(pdf_input: PdfInput) -> tuple[str, float | None]:
+def _extract_text_with_ocr(pdf_input: PdfInput) -> str:
     """
     OCR fallback for scanned/image-based PDFs.
 
@@ -282,10 +282,7 @@ def _extract_text_with_ocr(pdf_input: PdfInput) -> tuple[str, float | None]:
       - tesseract binaries available in PATH
     """
     from pdf2image import convert_from_bytes, convert_from_path
-    import cv2
-    import numpy as np
     import pytesseract
-    from pytesseract import Output
 
     # OCR rendering DPI controls (faster defaults than 300).
     dpi = _env_int("OCR_DPI", 220)
@@ -297,40 +294,8 @@ def _extract_text_with_ocr(pdf_input: PdfInput) -> tuple[str, float | None]:
         images = convert_from_path(pdf_input, dpi=dpi)
 
     ocr_pages = []
-    page_confidences: list[float] = []
-
-    def _preprocess_for_ocr(image):
-        np_image = np.array(image)
-        if len(np_image.shape) == 2:
-            gray = np_image
-        elif np_image.shape[2] == 4:
-            gray = cv2.cvtColor(np_image, cv2.COLOR_RGBA2GRAY)
-        else:
-            gray = cv2.cvtColor(np_image, cv2.COLOR_RGB2GRAY)
-        thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)[1]
-        return thresh
-
-    def _ocr_with_confidence(image):
-        processed_image = _preprocess_for_ocr(image)
-        page_text = (pytesseract.image_to_string(processed_image, config="--psm 6") or "").strip()
-        data = pytesseract.image_to_data(
-            processed_image,
-            config="--psm 6",
-            output_type=Output.DICT,
-        )
-        confidences = []
-        for conf in data.get("conf", []):
-            try:
-                conf_value = float(conf)
-            except (TypeError, ValueError):
-                continue
-            if conf_value >= 0:
-                confidences.append(conf_value)
-        avg_confidence = (sum(confidences) / len(confidences)) if confidences else None
-        return page_text, avg_confidence
-
     for page_index, image in enumerate(images):
-        page_text, page_confidence = _ocr_with_confidence(image)
+        page_text = (pytesseract.image_to_string(image, config="--psm 6") or "").strip()
 
         # If OCR text is weak, retry only this page once at fallback DPI.
         if (not _is_strong_ocr_text(page_text)) and fallback_dpi != dpi:
@@ -350,57 +315,28 @@ def _extract_text_with_ocr(pdf_input: PdfInput) -> tuple[str, float | None]:
                 )
 
             if fallback_images:
-                fallback_text, fallback_confidence = _ocr_with_confidence(fallback_images[0])
+                fallback_text = (pytesseract.image_to_string(fallback_images[0], config="--psm 6") or "").strip()
                 if len(fallback_text) > len(page_text):
                     page_text = fallback_text
-                    page_confidence = fallback_confidence
 
         if page_text:
             ocr_pages.append(page_text)
-        if page_confidence is not None:
-            page_confidences.append(page_confidence)
 
-    avg_confidence = (
-        (sum(page_confidences) / len(page_confidences))
-        if page_confidences else None
-    )
-    return "\n".join(ocr_pages).strip(), avg_confidence
+    return "\n".join(ocr_pages).strip()
 
 
-def _extract_text_with_ocr_image(image_input: PdfInput) -> tuple[str, float | None]:
+def _extract_text_with_ocr_image(image_input: PdfInput) -> str:
     """OCR a non-PDF image input with Tesseract."""
-    import cv2
-    import numpy as np
     from PIL import Image
     import pytesseract
-    from pytesseract import Output
 
     if isinstance(image_input, bytes):
         image = Image.open(BytesIO(image_input))
     else:
         image = Image.open(image_input)
 
-    np_image = np.array(image)
-    if len(np_image.shape) == 2:
-        gray = np_image
-    elif np_image.shape[2] == 4:
-        gray = cv2.cvtColor(np_image, cv2.COLOR_RGBA2GRAY)
-    else:
-        gray = cv2.cvtColor(np_image, cv2.COLOR_RGB2GRAY)
-    thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)[1]
-
-    text = (pytesseract.image_to_string(thresh, config="--psm 6") or "").strip()
-    data = pytesseract.image_to_data(thresh, config="--psm 6", output_type=Output.DICT)
-    confidences = []
-    for conf in data.get("conf", []):
-        try:
-            conf_value = float(conf)
-        except (TypeError, ValueError):
-            continue
-        if conf_value >= 0:
-            confidences.append(conf_value)
-    avg_confidence = (sum(confidences) / len(confidences)) if confidences else None
-    return text, avg_confidence
+    text = pytesseract.image_to_string(image, config="--psm 6")
+    return (text or "").strip()
 
 
 def _contains_invoice_anchors(text: str) -> bool:
@@ -437,20 +373,6 @@ def extract_text_from_document(
     force_ocr: bool = False,
     source_name: str | None = None,
 ) -> str:
-    """Backward-compatible text-only extraction API."""
-    text, _ = extract_text_with_confidence_from_document(
-        doc_input,
-        force_ocr=force_ocr,
-        source_name=source_name,
-    )
-    return text
-
-
-def extract_text_with_confidence_from_document(
-    doc_input: PdfInput,
-    force_ocr: bool = False,
-    source_name: str | None = None,
-) -> tuple[str, float | None]:
     """
     Extract text from PDF, Word, or image content.
 
@@ -477,19 +399,19 @@ def extract_text_with_confidence_from_document(
 
         if not text:
             raise ValueError("Word document uploaded but no readable text/tables were found.")
-        return text, None
+        return text
 
     if is_image:
         vision_failed = False
         try:
             vision_text = _extract_text_with_google_vision_image(doc_input)
             if vision_text:
-                return vision_text, None
+                return vision_text
         except Exception:
             vision_failed = True
 
         try:
-            ocr_text, ocr_confidence = _extract_text_with_ocr_image(doc_input)
+            ocr_text = _extract_text_with_ocr_image(doc_input)
         except Exception as exc:
             error_msg = "Unable to OCR image invoice. Verify OCR dependencies and image quality."
             if vision_failed:
@@ -502,7 +424,7 @@ def extract_text_with_confidence_from_document(
         if not ocr_text:
             raise ValueError("No extractable text found. This image appears empty or unreadable.")
 
-        return ocr_text, ocr_confidence
+        return ocr_text
 
     if not force_ocr:
         try:
@@ -511,11 +433,10 @@ def extract_text_with_confidence_from_document(
             raise PDFExtractionError("Unable to parse PDF text content.") from exc
 
         if len(direct_text) >= 250 and _contains_invoice_anchors(direct_text):
-            return direct_text, 100.0
+            return direct_text
 
     vision_failed = False
     ocr_text = ""
-    ocr_confidence: float | None = None
     try:
         vision_text = _extract_text_with_google_vision_pdf(doc_input)
         if vision_text:
@@ -526,19 +447,16 @@ def extract_text_with_confidence_from_document(
     # Skip slower Tesseract OCR when Google Vision text is already strong enough.
     if not _is_strong_ocr_text(ocr_text):
         try:
-            tesseract_text, tesseract_confidence = _extract_text_with_ocr(doc_input)
+            tesseract_text = _extract_text_with_ocr(doc_input)
             if len(tesseract_text) > len(ocr_text):
                 ocr_text = tesseract_text
-                ocr_confidence = tesseract_confidence
             elif ocr_text and tesseract_text:
                 ocr_text = f"{ocr_text}\n{tesseract_text}".strip()
-                ocr_confidence = tesseract_confidence
             else:
                 ocr_text = tesseract_text or ocr_text
-                ocr_confidence = tesseract_confidence or ocr_confidence
         except Exception as exc:
             if direct_text or ocr_text:
-                return _merge_text_candidates(direct_text, ocr_text), ocr_confidence
+                return _merge_text_candidates(direct_text, ocr_text)
 
             error_msg = (
                 "No extractable text found and OCR fallback failed. "
@@ -556,6 +474,4 @@ def extract_text_with_confidence_from_document(
     if not merged_text:
         raise ValueError("No extractable text found. This document appears scanned or empty.")
 
-    if merged_text == direct_text and direct_text:
-        return merged_text, 100.0
-    return merged_text, ocr_confidence
+    return merged_text
