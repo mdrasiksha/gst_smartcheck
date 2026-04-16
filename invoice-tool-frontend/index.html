@@ -240,7 +240,6 @@
     const MAX_BULK_FILES = 20;
     const FREE_UPLOAD_LIMIT = 20;
     const BASE_URL = "https://gst-smartcheck-docker.onrender.com";
-    const uploadEndpoint = `${BASE_URL}/upload`;
     const waitlistLink = "https://wa.me/918722250407?text=Hi,%20I%27m%20interested%20in%20the%20GST%20SmartCheck%20Pro%20Plan.";
 
     const form = document.getElementById("uploadForm");
@@ -280,6 +279,41 @@
 
     const openWaitlist = () => {
         window.open(waitlistLink, "_blank", "noopener,noreferrer");
+    };
+
+    const resolveApiBases = () => {
+        const bases = [];
+        const configuredBase = (window.GST_API_BASE_URL || "").trim();
+
+        if (configuredBase) {
+            bases.push(configuredBase);
+        }
+
+        if (window.location.protocol.startsWith("http")) {
+            bases.push(window.location.origin);
+        }
+
+        bases.push(BASE_URL);
+        bases.push("https://gst-smartcheck.onrender.com");
+
+        return [...new Set(bases.map((base) => base.replace(/\/+$/, "")))];
+    };
+
+    const fetchWithFallback = async (path, options = {}) => {
+        const bases = resolveApiBases();
+        let lastError = null;
+
+        for (const base of bases) {
+            const url = `${base}${path}`;
+            try {
+                const response = await fetch(url, options);
+                return { response, base };
+            } catch (error) {
+                lastError = error;
+            }
+        }
+
+        throw lastError || new Error("Unable to reach backend.");
     };
 
     const readValue = (value, fallback = "N/A") => {
@@ -327,7 +361,7 @@
     };
 
     const downloadTallyXml = async (invoiceId) => {
-        const response = await fetch(`${BASE_URL}/export/tally?invoice_id=${encodeURIComponent(invoiceId)}`);
+        const { response } = await fetchWithFallback(`/export/tally?invoice_id=${encodeURIComponent(invoiceId)}`);
         if (!response.ok) {
             let errorMessage = "Unable to export Tally XML right now.";
             try {
@@ -520,7 +554,7 @@
         formData.append("file", file);
         formData.append("output_format", outputFormat || "xlsx");
 
-        const response = await fetch(uploadEndpoint, {
+        const { response, base } = await fetchWithFallback("/upload", {
             method: "POST",
             body: formData
         });
@@ -542,7 +576,7 @@
             throw error;
         }
 
-        return response;
+        return { response, base };
     };
 
     const uploadBulkFiles = async (email, files, outputFormat) => {
@@ -555,7 +589,7 @@
             formData.append("files", file);
         });
 
-        const response = await fetch(`${BASE_URL}/upload-bulk`, {
+        const { response } = await fetchWithFallback("/upload-bulk", {
             method: "POST",
             body: formData
         });
@@ -629,7 +663,7 @@
                     setLoadingState(true, `Processing ${index + 1}/${files.length}...`);
 
                     try {
-                        const response = await uploadSingleFile(email, file, outputFormat);
+                        const { response, base } = await uploadSingleFile(email, file, outputFormat);
                         remaining = response.headers.get("X-Remaining") || remaining;
                         checksumPassed = checksumPassed || response.headers.get("X-GSTIN-Checksum") === "pass";
                         const contentType = (response.headers.get("Content-Type") || "").toLowerCase();
@@ -651,7 +685,7 @@
                             if (!filename) {
                                 throw new Error(`Missing download URL for ${file.name}.`);
                             }
-                            window.location.href = `${BASE_URL}/downloads/${filename}`;
+                            window.location.href = `${base}/downloads/${filename}`;
                             lastResult = result;
                         }
 
