@@ -40,6 +40,9 @@ ALL_INVOICES_COLUMNS = [
     "IGST",
     "Total Amount",
     "Confidence Score",
+    "Invoice Confidence",
+    "Tax Confidence",
+    "Total Confidence",
 ]
 LINE_ITEMS_COLUMNS = [
     "Invoice Number",
@@ -77,6 +80,9 @@ def _first_available(data, keys, default=None):
 
 
 def _extract_confidence_score(data):
+    overall_confidence = data.get("Overall Confidence")
+    if isinstance(overall_confidence, (int, float)):
+        return round(float(overall_confidence) * 100, 2)
     confidence_data = data.get("Confidence")
     if isinstance(confidence_data, dict) and confidence_data:
         return round(sum(confidence_data.values()) / len(confidence_data) * 100, 2)
@@ -222,6 +228,15 @@ def _extract_header_identity(data):
 
 
 def _build_all_invoices_frame(data, source_file_name=None):
+    field_conf = data.get("Field Confidence") if isinstance(data.get("Field Confidence"), dict) else {}
+    tax_conf_values = [
+        field_conf.get("CGST Amount"),
+        field_conf.get("SGST Amount"),
+        field_conf.get("IGST Amount"),
+    ]
+    tax_conf_values = [value for value in tax_conf_values if isinstance(value, (int, float))]
+    tax_confidence = round(sum(tax_conf_values) / len(tax_conf_values) * 100, 2) if tax_conf_values else None
+
     header_identity = _extract_header_identity(data)
     row = {
         "File Name": os.path.basename(source_file_name or data.get("Source File Name") or ""),
@@ -235,9 +250,12 @@ def _build_all_invoices_frame(data, source_file_name=None):
         "IGST": _to_numeric(_first_available(data, ["IGST Amount", "IGST"])),
         "Total Amount": _to_numeric(_first_available(data, ["Final Amount", "Total"])),
         "Confidence Score": _to_numeric(_extract_confidence_score(data)),
+        "Invoice Confidence": round(float(field_conf.get("Invoice Number", 0)) * 100, 2) if isinstance(field_conf.get("Invoice Number"), (int, float)) else None,
+        "Tax Confidence": tax_confidence,
+        "Total Confidence": round(float(field_conf.get("Final Amount", 0)) * 100, 2) if isinstance(field_conf.get("Final Amount"), (int, float)) else None,
     }
     frame = pd.DataFrame([row], columns=ALL_INVOICES_COLUMNS)
-    for col in ["Taxable Amount", "CGST", "SGST", "IGST", "Total Amount", "Confidence Score"]:
+    for col in ["Taxable Amount", "CGST", "SGST", "IGST", "Total Amount", "Confidence Score", "Invoice Confidence", "Tax Confidence", "Total Confidence"]:
         frame[col] = pd.to_numeric(frame[col], errors="coerce")
     return frame
 
@@ -382,6 +400,9 @@ def write_to_excel(data, status, output_path, source_file_name=None):
         "IGST": 12,
         "Total Amount": 16,
         "Confidence Score": 16,
+        "Invoice Confidence": 18,
+        "Tax Confidence": 16,
+        "Total Confidence": 16,
     }
     min_widths_line = {
         "Invoice Number": 18,

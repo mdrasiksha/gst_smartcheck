@@ -703,19 +703,120 @@ def _extract_total_using_keywords(lines: list[str], target_total: float) -> floa
     return round(min(candidates, key=lambda amount: abs(amount - target_total)), 2)
 
 
-def calculate_confidence(data: Dict) -> Dict:
-    """Calculate stage-4 confidence and return compact validation metrics."""
-    invoice_component = 0.95 if data.get("_invoice_number_label_match") else (0.7 if data.get("Invoice Number") else 0.2)
+def _is_valid_date(value) -> bool:
+    if not value:
+        return False
+    return bool(
+        re.search(
+            r"\b\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}\b|\b\d{1,2}\s+[A-Z]{3,9}\s+\d{2,4}\b|\b\d{1,2}-[A-Z]{3}-\d{2,4}\b",
+            str(value).upper(),
+        )
+    )
 
-    gst_number = data.get("GST Number")
-    gst_component = 0.95 if gst_number and validate_gstin_checksum(str(gst_number)) else 0.2
 
-    math_component = 0.1 if data.get("Step B - Tax Math Match") else 0.0
-    words_component = 0.1 if data.get("Step A - Words Match") else 0.0
+def _tax_rate_is_consistent(taxable: float | None, tax_amount: float | None, tolerance: float = 0.015) -> bool:
+    if taxable is None or taxable <= 0 or tax_amount is None:
+        return False
+    observed_rate = tax_amount / taxable
+    valid_rates = (0.025, 0.05, 0.06, 0.09, 0.12, 0.14, 0.18, 0.28)
+    return any(abs(observed_rate - valid_rate) <= tolerance for valid_rate in valid_rates)
 
-    overall_confidence = round((invoice_component + gst_component + math_component + words_component) / 4, 4)
+
+def calculate_field_confidence(data: dict, text: str) -> dict:
+    invoice_number = str(data.get("Invoice Number") or "").strip()
+    gstin = str(data.get("GSTIN") or data.get("GST Number") or "").strip().upper()
+    vendor_name = str(data.get("Vendor Name") or "").strip()
+    taxable = _coerce_float(data.get("Taxable Amount"))
+    cgst = _coerce_float(data.get("CGST Amount")) or 0.0
+    sgst = _coerce_float(data.get("SGST Amount")) or 0.0
+    igst = _coerce_float(data.get("IGST Amount")) or 0.0
+    final_amount = _coerce_float(data.get("Final Amount"))
+
+    tax_total = cgst + sgst + igst
+    expected_total = round((taxable or 0.0) + tax_total, 2) if taxable is not None else None
+    calc_match = expected_total is not None and final_amount is not None and abs(expected_total - final_amount) <= 1.0
+
+    invoice_pattern = bool(re.search(r"\b(?:INV|INVOICE)[\s\-_/]*[A-Z0-9]*\d+[A-Z0-9\-/]*\b", invoice_number, flags=re.IGNORECASE))
+    invoice_clean_len = len(re.sub(r"[^A-Z0-9]", "", invoice_number.upper()))
+    if invoice_pattern and invoice_clean_len >= 5:
+        invoice_conf = 0.92
+    elif invoice_clean_len >= 4 and re.search(r"\d", invoice_number):
+        invoice_conf = 0.7
+    else:
+        invoice_conf = 0.45
+
+    gstin_conf = 0.95 if (gstin and validate_gstin_checksum(gstin)) else 0.3
+
+    taxable_conf = 0.4
+    if taxable is not None and taxable > 0:
+        taxable_conf = 0.8
+        if calc_match:
+            taxable_conf = 0.95
+
+    final_conf = 0.4
+    if final_amount is not None and final_amount > 0:
+        final_conf = 0.8
+        if calc_match:
+            final_conf = 0.95
+
+    tax_confidence = {}
+    for tax_key, tax_amount in (("CGST Amount", cgst), ("SGST Amount", sgst), ("IGST Amount", igst)):
+        if tax_amount in {5.0, 12.0, 18.0}:
+            tax_confidence[tax_key] = 0.2
+        elif _tax_rate_is_consistent(taxable, tax_amount):
+            tax_confidence[tax_key] = 0.9
+        elif tax_amount > 0:
+            tax_confidence[tax_key] = 0.6
+        else:
+            tax_confidence[tax_key] = 0.5
+
+    vendor_alpha = len(vendor_name) > 3 and bool(re.search(r"[A-Z]{3,}", vendor_name.upper())) and not bool(
+        re.search(r"[^A-Z0-9&().,\- /\s]", vendor_name.upper())
+    )
+    vendor_conf = 0.8 if vendor_alpha else 0.3
+    date_conf = 0.9 if _is_valid_date(data.get("Invoice Date")) else 0.4
+
+    field_confidence = {
+        "Invoice Number": invoice_conf,
+        "Vendor Name": vendor_conf,
+        "GSTIN": gstin_conf,
+        "Taxable Amount": taxable_conf,
+        "CGST Amount": tax_confidence["CGST Amount"],
+        "SGST Amount": tax_confidence["SGST Amount"],
+        "IGST Amount": tax_confidence["IGST Amount"],
+        "Final Amount": final_conf,
+        "Invoice Date": date_conf,
+    }
+
+    if not calc_match:
+        for key in ("CGST Amount", "SGST Amount", "IGST Amount", "Final Amount"):
+            field_confidence[key] = min(field_confidence[key], 0.4)
+
+    return field_confidence
+
+
+def calculate_confidence(data: Dict, text: str) -> Dict:
+    """Calculate field-level + weighted overall confidence and return compact metrics."""
+    field_confidence = calculate_field_confidence(data, text)
+    weights = {
+        "Final Amount": 2,
+        "CGST Amount": 2,
+        "SGST Amount": 2,
+        "IGST Amount": 2,
+    }
+    total_weight = 0
+    weighted_sum = 0.0
+    for field, score in field_confidence.items():
+        weight = weights.get(field, 1)
+        total_weight += weight
+        weighted_sum += score * weight
+
+    overall_confidence = round(weighted_sum / total_weight, 4) if total_weight else 0.0
+    low_confidence_fields = [field for field, score in field_confidence.items() if score < 0.6]
     return {
         "Overall Confidence": overall_confidence,
+        "Field Confidence": field_confidence,
+        "Low Confidence Fields": low_confidence_fields,
         "Validation": data.get("Validation"),
         "Math Difference": data.get("Math Difference"),
     }
@@ -879,7 +980,10 @@ def run_validation_engine(text: str, data: Dict) -> Dict:
     validated["Step A - Words Match"] = words_match
 
     # Stage 4: Confidence scoring
-    confidence_summary = calculate_confidence(validated)
+    confidence_summary = calculate_confidence(validated, text)
+    validated["Field Confidence"] = confidence_summary["Field Confidence"]
+    validated["Confidence"] = dict(confidence_summary["Field Confidence"])
+    validated["_low_confidence_fields"] = confidence_summary["Low Confidence Fields"]
     validated["Overall Confidence"] = confidence_summary["Overall Confidence"]
 
     # Stage 5: Rules tracking
