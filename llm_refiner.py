@@ -37,21 +37,22 @@ def refine_with_llm(raw_text: str, data: dict) -> dict:
 
     snippet = _relevant_ocr_snippet(raw_text)
     prompt = (
-        "You are improving OCR invoice extraction with strict rules.\n"
-        "Fix OCR mistakes like O->0 and I->1 only when context clearly indicates numbers.\n"
-        "Extract these fields only: Invoice Number, Invoice Date (YYYY-MM-DD), Final Amount (float), GST Amount.\n"
-        "Map synonyms: Grand Total and Total Amt should be treated as Final Amount.\n"
-        "Do not hallucinate. Keep any missing value as null.\n"
-        "Return ONLY valid JSON with exactly these keys: "
-        "Invoice Number, Invoice Date, Final Amount, GST Amount."
+        "You are correcting financial fields from OCR invoice extraction.\n"
+        "Focus on financial correction only.\n"
+        "Validate this equation: Taxable Amount + CGST Amount + SGST Amount + IGST Amount = Final Amount.\n"
+        "Fix tax values and final amount only when clearly supported by the OCR text.\n"
+        "Do not hallucinate missing fields.\n"
+        "Return ONLY valid JSON with exactly these keys and float values: "
+        "Taxable Amount, CGST Amount, SGST Amount, IGST Amount, Final Amount."
     )
 
     user_payload = {
         "existing_data": {
-            "Invoice Number": data.get("Invoice Number"),
-            "Invoice Date": data.get("Invoice Date"),
+            "Taxable Amount": data.get("Taxable Amount"),
+            "CGST Amount": data.get("CGST Amount"),
+            "SGST Amount": data.get("SGST Amount"),
+            "IGST Amount": data.get("IGST Amount"),
             "Final Amount": data.get("Final Amount"),
-            "GST Amount": data.get("GST Amount"),
         },
         "ocr_relevant_lines": snippet,
     }

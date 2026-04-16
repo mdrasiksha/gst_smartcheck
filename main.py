@@ -84,16 +84,50 @@ def _safe_confidence(data: dict) -> float | None:
     return None
 
 
-def _should_use_llm(data: dict, status: str, text: str) -> bool:
-    if status == "VALID":
-        return False
-    final_amount_missing = _is_missing(data.get("Final Amount"))
-    validation_failed = _is_validation_failed(status)
+def _to_float(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.replace(",", "").strip()
+        if not cleaned:
+            return None
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
 
+
+def _is_calculation_incorrect(data: dict) -> bool:
+    taxable = _to_float(data.get("Taxable Amount"))
+    cgst = _to_float(data.get("CGST Amount"))
+    sgst = _to_float(data.get("SGST Amount"))
+    igst = _to_float(data.get("IGST Amount"))
+    total = _to_float(data.get("Final Amount"))
+
+    tax_fields = (cgst, sgst, igst)
+    if any(value is None for value in tax_fields):
+        return True
+    if total in (None, 0.0):
+        return True
+    if taxable is None:
+        return True
+
+    expected_total = taxable + cgst + sgst + igst
+    return abs(expected_total - total) > 1.0
+
+
+def _should_use_llm(data: dict, status: str, text: str) -> bool:
+    if _is_calculation_incorrect(data):
+        logger.info("LLM triggered due to calculation mismatch")
+        return True
+
+    final_amount_missing = _is_missing(data.get("Final Amount"))
     return bool(
         data.get("Requires Manual Review")
         or final_amount_missing
-        or validation_failed
     )
 
 
@@ -111,16 +145,13 @@ def _status_rank(status: str) -> int:
 
 def _apply_llm_updates_safely(original_data: dict, improved: dict) -> dict:
     merged = dict(original_data)
-    for key in ("Invoice Number", "Invoice Date", "GST Amount"):
-        if key in improved and improved.get(key) not in (None, ""):
-            merged[key] = improved.get(key)
 
-    if "Final Amount" in improved and improved.get("Final Amount") not in (None, ""):
-        original_final = merged.get("Final Amount")
-        try:
-            merged["Final Amount"] = float(improved.get("Final Amount"))
-        except (TypeError, ValueError):
-            merged["Final Amount"] = original_final
+    for key in ("Taxable Amount", "CGST Amount", "SGST Amount", "IGST Amount", "Final Amount"):
+        if key not in improved or improved.get(key) in (None, ""):
+            continue
+        value = _to_float(improved.get(key))
+        if value is not None:
+            merged[key] = value
 
     return merged
 
@@ -156,6 +187,8 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
 
     data["_llm_used"] = False
     data["_llm_improved"] = False
+    data["_calc_mismatch"] = _is_calculation_incorrect(data)
+    data["_llm_fix_applied"] = False
 
     llm_future = None
     llm_start = None
@@ -177,6 +210,7 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
             original_status = status
 
             candidate_data = _apply_llm_updates_safely(data, improved)
+            candidate_is_consistent = not _is_calculation_incorrect(candidate_data)
             candidate_status = validate_invoice(candidate_data)
 
             original_score = _status_rank(original_status)
@@ -190,14 +224,18 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
             )
 
             data["_llm_used"] = True
-            if candidate_better:
+            if candidate_is_consistent and candidate_better:
                 data = candidate_data
                 status = candidate_status
                 data["_llm_improved"] = True
+                data["_llm_fix_applied"] = True
             else:
                 data = original_data
                 status = original_status
                 data["_llm_improved"] = False
+                data["_llm_fix_applied"] = False
+
+    data["_calc_mismatch"] = _is_calculation_incorrect(data)
 
     if source_file_name:
         data["Source File Name"] = os.path.basename(source_file_name)
