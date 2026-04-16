@@ -1,31 +1,3 @@
-def _to_float(value, default=0.0):
-    try:
-        if value in (None, ""):
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def is_invoice_data_valid(data):
-    if not data:
-        return False
-
-    invoice_number = data.get("Invoice Number") or data.get("Invoice No")
-    invoice_date = data.get("Invoice Date") or data.get("Date")
-    if not invoice_number or not invoice_date:
-        return False
-
-    total = _to_float(data.get("Final Amount"), default=0.0)
-    taxable = _to_float(data.get("Taxable Amount") or data.get("Sub Total"), default=0.0)
-    gst = (
-        _to_float(data.get("CGST Amount"))
-        + _to_float(data.get("SGST Amount"))
-        + _to_float(data.get("IGST Amount"))
-    )
-    return abs((taxable + gst) - total) < 2
-
-
 def validate_invoice(data):
     if not data:
         return "INVALID DATA"
