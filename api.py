@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, Query, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, Query, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 import io
@@ -16,7 +16,6 @@ from collections import defaultdict, deque
 from pypdf.errors import PdfReadError
 
 from batch_excel_writer import write_batch_summary
-from excel_writer import write_to_excel
 from access_manager import (
     get_free_upload_count,
     increment_free_upload_count,
@@ -32,6 +31,7 @@ from database import (
     save_invoice_metadata,
     get_invoice_history,
     get_invoice_by_id,
+    upload_to_supabase,
 )
 from main import process_invoice_bytes, process_invoices_bulk
 from ocr import OCREngineError, PDFExtractionError
@@ -237,7 +237,6 @@ async def upload_invoice(
     email: str = Form(...),
     file: UploadFile = File(...),
     output_format: str = Form("xlsx"),
-    background_tasks: BackgroundTasks = None,
 ):
     normalized_output_format = (output_format or "xlsx").strip().lower()
     pro_user = is_pro_user(email)
@@ -295,26 +294,15 @@ async def upload_invoice(
 
         # 3) Write Excel into outputs so it remains downloadable until cleanup
         data, status = process_invoice_bytes(
-            stored_invoice_bytes,
-            excel_output_path,
-            source_file_name=original_filename,
-            write_excel_file=False,
+            stored_invoice_bytes, excel_output_path, source_file_name=original_filename
         )
-        if background_tasks is not None:
-            background_tasks.add_task(
-                write_to_excel,
-                data,
-                status,
-                excel_output_path,
-                source_file_name=original_filename,
-            )
-        else:
-            write_to_excel(data, status, excel_output_path, source_file_name=original_filename)
 
         # 4) Upload XLSX output to Supabase only when requested.
+        time.sleep(0.5)
         output_file_url = None
         if normalized_output_format != "xml":
-            output_file_url = f"/downloads/{excel_file_name}"
+            with open(excel_output_path, "rb") as excel_file:
+                output_file_url = upload_to_supabase(excel_file_name, excel_file.read())
 
         # keep source invoice url for history traceability
         invoice_pdf_url = get_public_invoice_url(storage_path)
@@ -512,6 +500,7 @@ async def download_excel(filename: str):
         raise HTTPException(status_code=404, detail="File not found")
 
     download_filename = sanitize_download_filename(safe_name, default_stem="invoice")
+    time.sleep(0.5)
     return FileResponse(
         path=file_path,
         filename=download_filename,
