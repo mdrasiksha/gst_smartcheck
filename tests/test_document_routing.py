@@ -44,3 +44,11 @@ def test_jpg_bytes_routes_to_image_ocr(monkeypatch):
 def test_invalid_bytes_rejected():
     with pytest.raises(ValueError, match="Unsupported file bytes"):
         ocr.extract_text_from_document(b"not-supported")
+
+
+def test_pdf_parser_failure_falls_back_to_ocr(monkeypatch):
+    monkeypatch.setattr(ocr, "_extract_text_with_pypdf", lambda _: (_ for _ in ()).throw(RuntimeError("bad pdf")))
+    monkeypatch.setattr(ocr, "_extract_text_with_google_vision_pdf", lambda _: "")
+    monkeypatch.setattr(ocr, "_extract_text_with_ocr", lambda _: "INVOICE GST TOTAL AMOUNT")
+    result = ocr.extract_text_from_document(b"%PDF-1.7 fake")
+    assert "INVOICE" in result

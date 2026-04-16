@@ -322,14 +322,8 @@ def _build_line_items_frame(data):
 
 def write_to_excel(data, status, output_path, source_file_name=None):
     df = _prepare_row(data, status, source_file_name=source_file_name)
-    summary_df = _build_summary_frame(data, source_file_name=source_file_name)
-    invoices_df = _build_all_invoices_frame(data, source_file_name=source_file_name)
-    line_items_df = _build_line_items_frame(data)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, sheet_name="Summary", index=False)
-        invoices_df.to_excel(writer, sheet_name="All Invoices", index=False)
-        line_items_df.to_excel(writer, sheet_name="Line Items", index=False)
         df.to_excel(writer, sheet_name="Legacy Export", index=False)
 
     wb = load_workbook(output_path)
@@ -388,36 +382,7 @@ def write_to_excel(data, status, output_path, source_file_name=None):
         "Confidence Score": 16,
         "Validation": 16,
     }
-    min_widths_all = {
-        "File Name": 24,
-        "Invoice Number": 18,
-        "Vendor Name": 24,
-        "GSTIN": 18,
-        "Date": 14,
-        "Taxable Amount": 16,
-        "CGST": 12,
-        "SGST": 12,
-        "IGST": 12,
-        "Total Amount": 16,
-        "Confidence Score": 16,
-        "Invoice Confidence": 18,
-        "Tax Confidence": 16,
-        "Total Confidence": 16,
-    }
-    min_widths_line = {
-        "Invoice Number": 18,
-        "Vendor Name": 24,
-        "Line Index": 12,
-        "Description": 36,
-        "Quantity": 12,
-        "Unit Price": 12,
-        "Total Price": 12,
-    }
-
     sheet_min_widths = {
-        "Summary": {"Generated Time": 24, "Total Files": 12, "Total Amount": 14},
-        "All Invoices": min_widths_all,
-        "Line Items": min_widths_line,
         "Legacy Export": min_widths_legacy,
     }
     for ws in wb.worksheets:
@@ -431,20 +396,6 @@ def write_to_excel(data, status, output_path, source_file_name=None):
                 if cell_value is not None:
                     max_length = max(max_length, len(str(cell_value)))
             ws.column_dimensions[col_letter].width = max(max_length + 3, min_widths.get(header, 12))
-
-    for ws_name, amount_columns in {
-        "Summary": ["Total Amount"],
-        "All Invoices": ["Taxable Amount", "CGST", "SGST", "IGST", "Total Amount"],
-        "Line Items": ["Unit Price", "Total Price"],
-    }.items():
-        ws = wb[ws_name]
-        header_to_idx = {ws.cell(row=1, column=i).value: i for i in range(1, ws.max_column + 1)}
-        for col in amount_columns:
-            col_idx = header_to_idx.get(col)
-            if not col_idx:
-                continue
-            for row_idx in range(2, ws.max_row + 1):
-                ws.cell(row=row_idx, column=col_idx).number_format = "0.00"
 
     try:
         wb.save(output_path)

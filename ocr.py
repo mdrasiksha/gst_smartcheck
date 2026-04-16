@@ -426,11 +426,15 @@ def extract_text_from_document(
 
         return ocr_text
 
+    pdf_parse_failed = False
     if not force_ocr:
         try:
             direct_text = _extract_text_with_pypdf(doc_input)
-        except Exception as exc:
-            raise PDFExtractionError("Unable to parse PDF text content.") from exc
+        except Exception:
+            # Don't hard-fail here: many valid invoices have malformed text layers.
+            # Continue with OCR fallback so PDF extraction remains resilient.
+            pdf_parse_failed = True
+            direct_text = ""
 
         if len(direct_text) >= 250 and _contains_invoice_anchors(direct_text):
             return direct_text
@@ -462,6 +466,11 @@ def extract_text_from_document(
                 "No extractable text found and OCR fallback failed. "
                 "Install/verify Tesseract and Poppler to process scanned PDFs."
             )
+            if pdf_parse_failed:
+                error_msg = (
+                    "Unable to parse PDF text content and OCR fallback failed. "
+                    "Install/verify Tesseract and Poppler to process scanned PDFs."
+                )
             if vision_failed:
                 error_msg = (
                     "Google Vision OCR failed and Tesseract OCR fallback failed. "
