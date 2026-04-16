@@ -38,6 +38,10 @@ def refine_with_llm(raw_text: str, data: dict) -> dict:
     snippet = _relevant_ocr_snippet(raw_text)
     prompt = (
         "You are correcting financial fields from OCR invoice extraction.\n"
+        "Extract ONLY values explicitly present in OCR text.\n"
+        "DO NOT guess or infer unsupported values.\n"
+        "DO NOT return placeholders like UNKNOWN, N/A, ORIGINAL, missing, or '.'.\n"
+        "If a value is not found, return null for that field.\n"
         "GST values like 5%, 12%, 18%, 28% are TAX RATES, not tax amounts.\n"
         "Calculate tax amount using: tax = taxable * rate / 100.\n"
         "If CGST + SGST is present, split tax equally unless OCR explicitly gives each rate.\n"
@@ -47,14 +51,14 @@ def refine_with_llm(raw_text: str, data: dict) -> dict:
         "Do not hallucinate unsupported values.\n"
         "Return ONLY valid JSON with exactly these keys:\n"
         "{"
-        "\"Invoice Number\":\"\","
-        "\"Vendor Name\":\"\","
-        "\"GSTIN\":\"\","
-        "\"Taxable Amount\":0.0,"
-        "\"CGST Amount\":0.0,"
-        "\"SGST Amount\":0.0,"
-        "\"IGST Amount\":0.0,"
-        "\"Final Amount\":0.0"
+        "\"Invoice Number\":null,"
+        "\"Vendor Name\":null,"
+        "\"GSTIN\":null,"
+        "\"Taxable Amount\":null,"
+        "\"CGST Amount\":null,"
+        "\"SGST Amount\":null,"
+        "\"IGST Amount\":null,"
+        "\"Final Amount\":null"
         "}."
     )
 
