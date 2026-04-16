@@ -355,6 +355,10 @@ async def upload_invoice(
                 "requires_manual_review": data.get("Requires Manual Review", False),
                 "status": status,
             },
+            "confidence": {
+                "overall": data.get("Overall Confidence"),
+                "fields": data.get("Field Confidence", {}),
+            },
         }
     finally:
         # 5) Retain generated files for download; cleanup removes files older than 24h

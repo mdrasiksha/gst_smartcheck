@@ -231,6 +231,12 @@ def _recalculate_total(data: dict) -> dict:
 
 
 def _should_use_llm(data: dict, status: str, text: str) -> bool:
+    field_confidence = data.get("Field Confidence") if isinstance(data.get("Field Confidence"), dict) else {}
+    critical_fields = ("Final Amount", "Taxable Amount", "GSTIN")
+    if field_confidence and any(float(field_confidence.get(field, 1.0)) < 0.6 for field in critical_fields):
+        logger.info("LLM triggered due to low confidence in critical fields")
+        return True
+
     if _is_gst_percentage_misinterpreted(data):
         logger.info("LLM triggered due to GST percentage misinterpretation")
         return True
@@ -440,8 +446,8 @@ def process_invoices_bulk(invoice_jobs):
                     job["pdf_path"], output_path, source_file_name=name
                 )
 
-            confidence = data.get("Confidence") if isinstance(data.get("Confidence"), dict) else {}
-            confidence_score = round((sum(confidence.values()) / len(confidence)) * 100, 2) if confidence else None
+            overall_confidence = data.get("Overall Confidence")
+            confidence_score = round(float(overall_confidence) * 100, 2) if isinstance(overall_confidence, (int, float)) else None
 
             return {
                 "Source File Name": name,
