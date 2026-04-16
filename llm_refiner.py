@@ -2,7 +2,11 @@ import json
 import os
 import re
 
-from openai import OpenAI
+try:
+    from openai import OpenAI
+    print("OpenAI loaded successfully")
+except ImportError:
+    OpenAI = None
 
 
 def _relevant_ocr_snippet(raw_text: str) -> str:
@@ -24,6 +28,8 @@ def _clean_json_block(content: str) -> str:
 
 def refine_with_llm(raw_text: str, data: dict) -> dict:
     if not raw_text or not isinstance(data, dict):
+        return data
+    if OpenAI is None:
         return data
 
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
