@@ -51,6 +51,23 @@ LINE_ITEMS_COLUMNS = [
     "Total Price",
 ]
 
+INVALID_TEXT_VALUES = {"", ".", "-", "missing", "na", "null", "n/a", "unknown", "original"}
+
+
+def _is_valid_value(val: str) -> bool:
+    if val is None:
+        return False
+    text = str(val).strip()
+    if not text:
+        return False
+    if text.lower() in INVALID_TEXT_VALUES:
+        return False
+    if len(re.sub(r"[^A-Za-z0-9]", "", text)) < 2:
+        return False
+    if not re.search(r"[A-Za-z0-9]", text):
+        return False
+    return True
+
 
 def _first_available(data, keys, default=None):
     for key in keys:
@@ -144,6 +161,28 @@ def _clean_text_value(value):
     return text
 
 
+def clean_text(text):
+    if text is None:
+        return ""
+    cleaned = str(text).replace("|", " ").replace("-", " ").replace(".", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    tokens = [token for token in cleaned.split() if len(re.sub(r"[^A-Za-z0-9]", "", token)) > 1]
+    final_text = " ".join(tokens).strip()
+    return final_text if _is_valid_value(final_text) else ""
+
+
+def _infer_quantity_from_text(description: str):
+    if not description:
+        return None
+    qty_match = re.search(r"\b(?:QTY|QUANTITY)\s*[:x-]?\s*(\d+(?:\.\d+)?)\b", description, flags=re.IGNORECASE)
+    if qty_match:
+        return _to_numeric(qty_match.group(1))
+    trailing_number = re.search(r"\b(\d+(?:\.\d+)?)\b", description)
+    if trailing_number:
+        return _to_numeric(trailing_number.group(1))
+    return None
+
+
 def _extract_header_identity(data):
     invoice_number = _clean_text_value(_first_available(data, ["Invoice Number", "Invoice No"]))
     vendor_name = _clean_text_value(_first_available(data, ["Vendor Name", "Supplier Name"]))
@@ -173,9 +212,12 @@ def _extract_header_identity(data):
                 vendor_name = cleaned
                 break
 
+    invoice_number = invoice_number if _is_valid_value(invoice_number) else None
+    vendor_name = vendor_name if _is_valid_value(vendor_name) else None
+
     return {
-        "Invoice Number": invoice_number or "UNKNOWN",
-        "Vendor Name": vendor_name or "UNKNOWN",
+        "Invoice Number": invoice_number,
+        "Vendor Name": vendor_name,
     }
 
 
@@ -213,29 +255,27 @@ def _line_items_from_data(data):
     header_identity = _extract_header_identity(data)
     invoice_number = header_identity["Invoice Number"]
     vendor_name = header_identity["Vendor Name"]
-    final_amount = _to_numeric(_first_available(data, ["Final Amount", "Total"]))
     rows = []
     line_index = 1
     for item in raw_line_items:
         if not isinstance(item, dict):
             continue
 
-        description = _clean_text_value(_first_available(item, ["Description", "Item", "Particulars"], default=""))
+        description = clean_text(_first_available(item, ["Description", "Item", "Particulars"], default=""))
         qty = _to_numeric(_first_available(item, ["Quantity", "Qty", "quantity"]))
         unit_price = _to_numeric(_first_available(item, ["Unit Price", "Rate", "unit_price"]))
         total_price = _to_numeric(_first_available(item, ["Total Price", "Amount", "Line Total", "total_price"]))
 
         if qty is None:
-            qty = 1.0
+            qty = _infer_quantity_from_text(description)
+        if qty is None:
+            continue
+        if unit_price is None:
+            continue
         if total_price is None and unit_price is not None:
             total_price = qty * unit_price
-        if unit_price is None and total_price is not None and qty not in (None, 0):
-            unit_price = total_price / qty
 
-        numeric_fields = [qty, unit_price, total_price]
         if not description:
-            continue
-        if all(value is None for value in numeric_fields):
             continue
 
         item_row = {
@@ -250,20 +290,6 @@ def _line_items_from_data(data):
         print("LINE ITEM:", item_row)
         rows.append(item_row)
         line_index += 1
-
-    if not rows:
-        fallback_unit_price = round(final_amount, 2) if final_amount is not None else 0.0
-        fallback_row = {
-            "Invoice Number": invoice_number,
-            "Vendor Name": vendor_name,
-            "Line Index": 1,
-            "Description": "TOTAL",
-            "Quantity": 1.0,
-            "Unit Price": fallback_unit_price,
-            "Total Price": fallback_unit_price,
-        }
-        print("LINE ITEM:", fallback_row)
-        rows.append(fallback_row)
 
     return rows
 

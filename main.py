@@ -14,6 +14,7 @@ from cache_helper import get_cached_invoice_result, set_cached_invoice_result
 
 logger = logging.getLogger(__name__)
 _LLM_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+_INVALID_TEXT_VALUES = {"", ".", "-", "missing", "na", "null", "n/a", "unknown", "original"}
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -72,6 +73,21 @@ def _should_retry_force_ocr(data: dict, text: str) -> bool:
 
 def _is_missing(value) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _is_valid_value(val: str) -> bool:
+    if val is None:
+        return False
+    text = str(val).strip()
+    if not text:
+        return False
+    if text.lower() in _INVALID_TEXT_VALUES:
+        return False
+    if len(re.sub(r"[^A-Za-z0-9]", "", text)) < 2:
+        return False
+    if not re.search(r"[A-Za-z0-9]", text):
+        return False
+    return True
 
 
 def _is_validation_failed(status: str) -> bool:
@@ -222,6 +238,9 @@ def _should_use_llm(data: dict, status: str, text: str) -> bool:
     if _is_calculation_incorrect(data):
         logger.info("LLM triggered due to calculation mismatch")
         return True
+    if not _is_valid_value(data.get("Invoice Number")) or not _is_valid_value(data.get("Vendor Name")):
+        logger.info("LLM triggered due to missing/invalid header identity fields")
+        return True
 
     final_amount_missing = _is_missing(data.get("Final Amount"))
     return bool(
@@ -257,7 +276,8 @@ def _apply_llm_updates_safely(original_data: dict, improved: dict) -> dict:
         if key not in improved or improved.get(key) in (None, ""):
             continue
         if key in {"Invoice Number", "Vendor Name"}:
-            merged[key] = improved.get(key)
+            if _is_valid_value(improved.get(key)):
+                merged[key] = str(improved.get(key)).strip()
             continue
         value = _to_float(improved.get(key))
         if value is not None:
@@ -300,6 +320,10 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
             data = retry_data
 
     data = _fix_gst_calculation(data, text)
+    if not _is_valid_value(data.get("Invoice Number")):
+        data["Invoice Number"] = None
+    if not _is_valid_value(data.get("Vendor Name")):
+        data["Vendor Name"] = None
     status = validate_invoice(data)
 
     data["_llm_used"] = False
@@ -353,6 +377,8 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
                 data["_llm_fix_applied"] = False
 
     data["_calc_mismatch"] = _is_calculation_incorrect(data)
+    if not _is_valid_value(data.get("Invoice Number")):
+        raise ValueError("Unable to extract invoice number")
 
     if source_file_name:
         data["Source File Name"] = os.path.basename(source_file_name)
