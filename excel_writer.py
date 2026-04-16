@@ -1,6 +1,7 @@
 import xml.etree.ElementTree as ET
 from datetime import datetime
 import os
+import re
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -136,11 +137,54 @@ def _to_numeric(value):
         return None
 
 
+def _clean_text_value(value):
+    text = "" if value is None else str(value).strip()
+    if text in {"", ".", "-", "—", '""', "''"}:
+        return ""
+    return text
+
+
+def _extract_header_identity(data):
+    invoice_number = _clean_text_value(_first_available(data, ["Invoice Number", "Invoice No"]))
+    vendor_name = _clean_text_value(_first_available(data, ["Vendor Name", "Supplier Name"]))
+    fallback_text = "\n".join(
+        str(data.get(key) or "")
+        for key in ("Raw Text", "OCR Text", "raw_text", "text")
+        if data.get(key)
+    )
+
+    if not invoice_number and fallback_text:
+        invoice_match = re.search(
+            r"(?:INVOICE|INV|BILL)\s*(?:NO|NUMBER)?\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-/]*)",
+            fallback_text,
+            flags=re.IGNORECASE,
+        )
+        if invoice_match:
+            invoice_number = _clean_text_value(invoice_match.group(1))
+
+    if not vendor_name and fallback_text:
+        for line in fallback_text.splitlines():
+            cleaned = _clean_text_value(line)
+            if not cleaned:
+                continue
+            if re.search(r"\b(INVOICE|BILL TO|SHIP TO|GSTIN|GST)\b", cleaned, flags=re.IGNORECASE):
+                continue
+            if re.search(r"[A-Za-z]{3,}", cleaned):
+                vendor_name = cleaned
+                break
+
+    return {
+        "Invoice Number": invoice_number or "UNKNOWN",
+        "Vendor Name": vendor_name or "UNKNOWN",
+    }
+
+
 def _build_all_invoices_frame(data, source_file_name=None):
+    header_identity = _extract_header_identity(data)
     row = {
         "File Name": os.path.basename(source_file_name or data.get("Source File Name") or ""),
-        "Invoice Number": _first_available(data, ["Invoice Number", "Invoice No"]),
-        "Vendor Name": _first_available(data, ["Vendor Name", "Supplier Name"]),
+        "Invoice Number": header_identity["Invoice Number"],
+        "Vendor Name": header_identity["Vendor Name"],
         "GSTIN": str(_first_available(data, ["GSTIN", "GST Number"], default="") or "").upper() or None,
         "Date": _normalize_date(_first_available(data, ["Invoice Date", "Date"])),
         "Taxable Amount": _to_numeric(_first_available(data, ["Taxable Amount", "Taxable Value"])),
@@ -166,43 +210,66 @@ def _line_items_from_data(data):
     if not isinstance(raw_line_items, list):
         raw_line_items = []
 
-    invoice_number = _first_available(data, ["Invoice Number", "Invoice No"])
-    vendor_name = _first_available(data, ["Vendor Name", "Supplier Name"])
+    header_identity = _extract_header_identity(data)
+    invoice_number = header_identity["Invoice Number"]
+    vendor_name = header_identity["Vendor Name"]
+    final_amount = _to_numeric(_first_available(data, ["Final Amount", "Total"]))
     rows = []
-    for idx, item in enumerate(raw_line_items, start=1):
+    line_index = 1
+    for item in raw_line_items:
         if not isinstance(item, dict):
             continue
+
+        description = _clean_text_value(_first_available(item, ["Description", "Item", "Particulars"], default=""))
         qty = _to_numeric(_first_available(item, ["Quantity", "Qty", "quantity"]))
         unit_price = _to_numeric(_first_available(item, ["Unit Price", "Rate", "unit_price"]))
-        total_price = round((qty or 0.0) * (unit_price or 0.0), 2)
-        rows.append(
-            {
-                "Invoice Number": invoice_number,
-                "Vendor Name": vendor_name,
-                "Line Index": idx,
-                "Description": _first_available(item, ["Description", "Item", "Particulars"], default=""),
-                "Quantity": qty,
-                "Unit Price": unit_price,
-                "Total Price": total_price,
-            }
-        )
+        total_price = _to_numeric(_first_available(item, ["Total Price", "Amount", "Line Total", "total_price"]))
+
+        if qty is None:
+            qty = 1.0
+        if total_price is None and unit_price is not None:
+            total_price = qty * unit_price
+        if unit_price is None and total_price is not None and qty not in (None, 0):
+            unit_price = total_price / qty
+
+        numeric_fields = [qty, unit_price, total_price]
+        if not description:
+            continue
+        if all(value is None for value in numeric_fields):
+            continue
+
+        item_row = {
+            "Invoice Number": invoice_number,
+            "Vendor Name": vendor_name,
+            "Line Index": line_index,
+            "Description": description,
+            "Quantity": qty,
+            "Unit Price": round(unit_price, 2) if unit_price is not None else None,
+            "Total Price": round(total_price, 2) if total_price is not None else None,
+        }
+        print("LINE ITEM:", item_row)
+        rows.append(item_row)
+        line_index += 1
+
+    if not rows:
+        fallback_unit_price = round(final_amount, 2) if final_amount is not None else 0.0
+        fallback_row = {
+            "Invoice Number": invoice_number,
+            "Vendor Name": vendor_name,
+            "Line Index": 1,
+            "Description": "TOTAL",
+            "Quantity": 1.0,
+            "Unit Price": fallback_unit_price,
+            "Total Price": fallback_unit_price,
+        }
+        print("LINE ITEM:", fallback_row)
+        rows.append(fallback_row)
+
     return rows
 
 
 def _build_line_items_frame(data):
     rows = _line_items_from_data(data)
-    if not rows:
-        rows = [
-            {
-                "Invoice Number": _first_available(data, ["Invoice Number", "Invoice No"]),
-                "Vendor Name": _first_available(data, ["Vendor Name", "Supplier Name"]),
-                "Line Index": None,
-                "Description": "",
-                "Quantity": None,
-                "Unit Price": None,
-                "Total Price": None,
-            }
-        ]
     frame = pd.DataFrame(rows, columns=LINE_ITEMS_COLUMNS)
     for col in ["Quantity", "Unit Price", "Total Price"]:
         frame[col] = pd.to_numeric(frame[col], errors="coerce")
