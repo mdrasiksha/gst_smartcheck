@@ -10,8 +10,7 @@ def _relevant_ocr_snippet(raw_text: str) -> str:
     lines = [line.strip() for line in (raw_text or "").splitlines() if line.strip()]
     filtered = [line for line in lines if any(keyword in line.lower() for keyword in keywords)]
     selected = filtered[:80] if filtered else lines[:80]
-    snippet = "\n".join(selected)
-    return snippet[:1500]
+    return "\n".join(selected)
 
 
 def _clean_json_block(content: str) -> str:
