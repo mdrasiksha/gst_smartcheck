@@ -1,4 +1,6 @@
 import os
+import time
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ocr import extract_text_from_document
@@ -6,6 +8,11 @@ from extractor_wrapper import extract_with_audit
 from validators import validate_invoice
 from excel_writer import write_to_excel
 from llm_refiner import refine_with_llm
+from cache_helper import get_cached_invoice_result, set_cached_invoice_result
+
+
+logger = logging.getLogger(__name__)
+_LLM_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -45,11 +52,15 @@ def _should_retry_force_ocr(data: dict, text: str) -> bool:
         return False
     if not data.get("Requires Manual Review"):
         return False
+    if len((text or "").strip()) > _env_int("OCR_RETRY_TEXT_LEN_SKIP", 450):
+        return False
 
     final_amount_missing = data.get("Final Amount") in (None, 0, "0", "0.0")
     text_quality_poor = _text_quality_is_poor(text)
-    min_confidence_for_skip_retry = _env_float("MIN_CONFIDENCE_FOR_SKIP_RETRY", 0.72)
+    min_confidence_for_skip_retry = _env_float("MIN_CONFIDENCE_FOR_SKIP_RETRY", 0.75)
     confidence = data.get("Overall Confidence")
+    if isinstance(confidence, (int, float)) and confidence >= min_confidence_for_skip_retry:
+        return False
     confidence_below_threshold = isinstance(confidence, (int, float)) and confidence < min_confidence_for_skip_retry
 
     # Retry OCR only when a manual-review case has a concrete signal of weak extraction.
@@ -74,20 +85,15 @@ def _safe_confidence(data: dict) -> float | None:
 
 
 def _should_use_llm(data: dict, status: str, text: str) -> bool:
+    if status == "VALID":
+        return False
     final_amount_missing = _is_missing(data.get("Final Amount"))
-    invoice_number_missing = _is_missing(data.get("Invoice Number"))
     validation_failed = _is_validation_failed(status)
-    confidence = _safe_confidence(data)
-    confidence_low = confidence is not None and confidence < 0.75
-    text_quality_poor = _text_quality_is_poor(text)
 
     return bool(
         data.get("Requires Manual Review")
         or final_amount_missing
-        or invoice_number_missing
         or validation_failed
-        or confidence_low
-        or text_quality_poor
     )
 
 
@@ -119,16 +125,30 @@ def _apply_llm_updates_safely(original_data: dict, improved: dict) -> dict:
     return merged
 
 def _extract_data_from_document_input(document_input, source_file_name=None):
+    total_start = time.time()
+    ocr_start = time.time()
     text = extract_text_from_document(document_input, source_name=source_file_name)
+    ocr_end = time.time()
+    logger.info("perf source=%s stage=ocr duration=%.3fs", source_file_name or "unknown", ocr_end - ocr_start)
 
     if not text or len(text.strip()) < 50:
         raise ValueError("OCR failed or insufficient text extracted")
 
+    extraction_start = time.time()
     data = extract_with_audit(text)
+    extraction_end = time.time()
+    logger.info("perf source=%s stage=extract duration=%.3fs", source_file_name or "unknown", extraction_end - extraction_start)
 
     if _should_retry_force_ocr(data, text):
+        retry_ocr_start = time.time()
         retry_text = extract_text_from_document(document_input, force_ocr=True, source_name=source_file_name)
+        retry_ocr_end = time.time()
+        logger.info("perf source=%s stage=ocr_retry duration=%.3fs", source_file_name or "unknown", retry_ocr_end - retry_ocr_start)
+
+        retry_extract_start = time.time()
         retry_data = extract_with_audit(retry_text)
+        retry_extract_end = time.time()
+        logger.info("perf source=%s stage=extract_retry duration=%.3fs", source_file_name or "unknown", retry_extract_end - retry_extract_start)
         if not retry_data.get("Requires Manual Review"):
             data = retry_data
 
@@ -137,8 +157,21 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
     data["_llm_used"] = False
     data["_llm_improved"] = False
 
+    llm_future = None
+    llm_start = None
     if _should_use_llm(data, status, text):
-        improved = refine_with_llm(text, data)
+        llm_start = time.time()
+        llm_future = _LLM_EXECUTOR.submit(refine_with_llm, text, data)
+
+    if llm_future is not None:
+        improved = None
+        try:
+            improved = llm_future.result(timeout=5)
+        except Exception:
+            improved = data
+        finally:
+            logger.info("perf source=%s stage=llm duration=%.3fs", source_file_name or "unknown", time.time() - llm_start)
+
         if isinstance(improved, dict) and improved and improved is not data:
             original_data = dict(data)
             original_status = status
@@ -169,6 +202,7 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
     if source_file_name:
         data["Source File Name"] = os.path.basename(source_file_name)
 
+    logger.info("perf source=%s stage=total duration=%.3fs", source_file_name or "unknown", time.time() - total_start)
     return data, status
 
 
@@ -179,9 +213,19 @@ def process_invoice(pdf_path, output_path, source_file_name=None):
     return data, status
 
 
-def process_invoice_bytes(pdf_bytes, output_path, source_file_name=None):
-    data, status = _extract_data_from_document_input(pdf_bytes, source_file_name=source_file_name)
-    write_to_excel(data, status, output_path, source_file_name=source_file_name)
+def process_invoice_bytes(pdf_bytes, output_path, source_file_name=None, write_excel_file=True):
+    start = time.time()
+    cached = get_cached_invoice_result(pdf_bytes)
+    if cached is not None:
+        data, status = cached
+        if source_file_name:
+            data["Source File Name"] = os.path.basename(source_file_name)
+        logger.info("perf source=%s stage=cache_hit duration=%.3fs", source_file_name or "unknown", time.time() - start)
+    else:
+        data, status = _extract_data_from_document_input(pdf_bytes, source_file_name=source_file_name)
+        set_cached_invoice_result(pdf_bytes, data, status)
+    if write_excel_file:
+        write_to_excel(data, status, output_path, source_file_name=source_file_name)
     return data, status
 
 
@@ -251,7 +295,8 @@ def process_invoices_bulk(invoice_jobs):
             }
 
     # Parallel bulk mode (configurable) with per-file isolation preserved.
-    max_workers = max(1, _env_int("BULK_MAX_WORKERS", 4))
+    default_workers = min(8, max(1, (os.cpu_count() or 1) * 2))
+    max_workers = max(1, _env_int("BULK_MAX_WORKERS", default_workers))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_index = {
             executor.submit(_process_single_job, job): idx
