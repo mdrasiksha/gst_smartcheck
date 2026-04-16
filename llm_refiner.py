@@ -38,16 +38,31 @@ def refine_with_llm(raw_text: str, data: dict) -> dict:
     snippet = _relevant_ocr_snippet(raw_text)
     prompt = (
         "You are correcting financial fields from OCR invoice extraction.\n"
-        "Focus on financial correction only.\n"
-        "Validate this equation: Taxable Amount + CGST Amount + SGST Amount + IGST Amount = Final Amount.\n"
-        "Fix tax values and final amount only when clearly supported by the OCR text.\n"
-        "Do not hallucinate missing fields.\n"
-        "Return ONLY valid JSON with exactly these keys and float values: "
-        "Taxable Amount, CGST Amount, SGST Amount, IGST Amount, Final Amount."
+        "GST values like 5%, 12%, 18%, 28% are TAX RATES, not tax amounts.\n"
+        "Calculate tax amount using: tax = taxable * rate / 100.\n"
+        "If CGST + SGST is present, split tax equally unless OCR explicitly gives each rate.\n"
+        "If IGST is present, compute IGST directly from taxable amount and IGST rate.\n"
+        "Always enforce: Final Amount = Taxable Amount + CGST Amount + SGST Amount + IGST Amount.\n"
+        "Extract GSTIN carefully and preserve invoice identity fields.\n"
+        "Do not hallucinate unsupported values.\n"
+        "Return ONLY valid JSON with exactly these keys:\n"
+        "{"
+        "\"Invoice Number\":\"\","
+        "\"Vendor Name\":\"\","
+        "\"GSTIN\":\"\","
+        "\"Taxable Amount\":0.0,"
+        "\"CGST Amount\":0.0,"
+        "\"SGST Amount\":0.0,"
+        "\"IGST Amount\":0.0,"
+        "\"Final Amount\":0.0"
+        "}."
     )
 
     user_payload = {
         "existing_data": {
+            "Invoice Number": data.get("Invoice Number"),
+            "Vendor Name": data.get("Vendor Name"),
+            "GSTIN": data.get("GSTIN") or data.get("GST Number"),
             "Taxable Amount": data.get("Taxable Amount"),
             "CGST Amount": data.get("CGST Amount"),
             "SGST Amount": data.get("SGST Amount"),

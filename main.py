@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ocr import extract_text_from_document
@@ -119,7 +120,105 @@ def _is_calculation_incorrect(data: dict) -> bool:
     return abs(expected_total - total) > 1.0
 
 
+def _is_gst_percentage_misinterpreted(data: dict) -> bool:
+    taxable = _to_float(data.get("Taxable Amount"))
+    cgst = _to_float(data.get("CGST Amount"))
+    sgst = _to_float(data.get("SGST Amount"))
+    igst = _to_float(data.get("IGST Amount"))
+    tax_values = [v for v in (cgst, sgst, igst) if v is not None]
+
+    if taxable is None or taxable <= 500 or not tax_values:
+        return False
+
+    if any(v in {2.5, 5.0, 12.0, 18.0, 28.0} for v in tax_values):
+        return True
+
+    if any(v < 50 for v in tax_values):
+        return True
+
+    return False
+
+
+def _detect_gst_rates(text: str) -> dict:
+    upper = (text or "").upper()
+    slab_pattern = r"(?:2\.5|5|12|18|28)"
+
+    igst_matches = [float(v) for v in re.findall(rf"\bIGST\s*({slab_pattern})\s*%", upper)]
+    cgst_matches = [float(v) for v in re.findall(rf"\bCGST\s*({slab_pattern})\s*%", upper)]
+    sgst_matches = [float(v) for v in re.findall(rf"\bSGST\s*({slab_pattern})\s*%", upper)]
+    generic_matches = [float(v) for v in re.findall(rf"\b({slab_pattern})\s*%", upper)]
+
+    if igst_matches:
+        return {"mode": "igst", "rate": max(igst_matches)}
+
+    if cgst_matches and sgst_matches:
+        return {"mode": "cgst_sgst", "cgst_rate": max(cgst_matches), "sgst_rate": max(sgst_matches)}
+
+    if generic_matches:
+        return {"mode": "cgst_sgst", "rate": max(generic_matches)}
+
+    return {}
+
+
+def _fix_gst_calculation(data: dict, text: str) -> dict:
+    corrected = dict(data)
+    corrected["_gst_fixed"] = False
+
+    taxable = _to_float(corrected.get("Taxable Amount"))
+    if taxable is None or taxable <= 0:
+        return corrected
+
+    rates = _detect_gst_rates(text)
+    if not rates:
+        return corrected
+
+    should_fix = _is_gst_percentage_misinterpreted(corrected) or _is_calculation_incorrect(corrected)
+    if not should_fix:
+        return corrected
+
+    cgst = 0.0
+    sgst = 0.0
+    igst = 0.0
+
+    if rates.get("mode") == "igst":
+        gst_rate = float(rates.get("rate") or 0.0)
+        igst = round(taxable * gst_rate / 100, 2)
+    else:
+        cgst_rate = rates.get("cgst_rate")
+        sgst_rate = rates.get("sgst_rate")
+        if cgst_rate is None or sgst_rate is None:
+            total_rate = float(rates.get("rate") or 0.0)
+            cgst_rate = total_rate / 2
+            sgst_rate = total_rate / 2
+        cgst = round(taxable * float(cgst_rate) / 100, 2)
+        sgst = round(taxable * float(sgst_rate) / 100, 2)
+
+    total = round(taxable + cgst + sgst + igst, 2)
+    corrected["CGST Amount"] = cgst
+    corrected["SGST Amount"] = sgst
+    corrected["IGST Amount"] = igst
+    corrected["Final Amount"] = total
+    corrected["_gst_fixed"] = True
+    return corrected
+
+
+def _recalculate_total(data: dict) -> dict:
+    recalculated = dict(data)
+    taxable = _to_float(recalculated.get("Taxable Amount"))
+    cgst = _to_float(recalculated.get("CGST Amount"))
+    sgst = _to_float(recalculated.get("SGST Amount"))
+    igst = _to_float(recalculated.get("IGST Amount"))
+    if None in (taxable, cgst, sgst, igst):
+        return recalculated
+    recalculated["Final Amount"] = round(taxable + cgst + sgst + igst, 2)
+    return recalculated
+
+
 def _should_use_llm(data: dict, status: str, text: str) -> bool:
+    if _is_gst_percentage_misinterpreted(data):
+        logger.info("LLM triggered due to GST percentage misinterpretation")
+        return True
+
     if _is_calculation_incorrect(data):
         logger.info("LLM triggered due to calculation mismatch")
         return True
@@ -146,13 +245,30 @@ def _status_rank(status: str) -> int:
 def _apply_llm_updates_safely(original_data: dict, improved: dict) -> dict:
     merged = dict(original_data)
 
-    for key in ("Taxable Amount", "CGST Amount", "SGST Amount", "IGST Amount", "Final Amount"):
+    for key in (
+        "Invoice Number",
+        "Vendor Name",
+        "Taxable Amount",
+        "CGST Amount",
+        "SGST Amount",
+        "IGST Amount",
+        "Final Amount",
+    ):
         if key not in improved or improved.get(key) in (None, ""):
+            continue
+        if key in {"Invoice Number", "Vendor Name"}:
+            merged[key] = improved.get(key)
             continue
         value = _to_float(improved.get(key))
         if value is not None:
             merged[key] = value
 
+    gstin = improved.get("GSTIN")
+    if isinstance(gstin, str) and gstin.strip():
+        merged["GSTIN"] = gstin.strip().upper()
+        merged["GST Number"] = gstin.strip().upper()
+
+    merged = _recalculate_total(merged)
     return merged
 
 def _extract_data_from_document_input(document_input, source_file_name=None):
@@ -183,6 +299,7 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
         if not retry_data.get("Requires Manual Review"):
             data = retry_data
 
+    data = _fix_gst_calculation(data, text)
     status = validate_invoice(data)
 
     data["_llm_used"] = False
