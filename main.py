@@ -5,6 +5,7 @@ from ocr import extract_text_from_document
 from extractor_wrapper import extract_with_audit
 from validators import validate_invoice
 from excel_writer import write_to_excel
+from llm_refiner import refine_with_llm
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -55,6 +56,68 @@ def _should_retry_force_ocr(data: dict, text: str) -> bool:
     return final_amount_missing or text_quality_poor or confidence_below_threshold
 
 
+
+
+def _is_missing(value) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _is_validation_failed(status: str) -> bool:
+    return status not in {"VALID", "VALID (NON-GST)", "Non GST Invoice"}
+
+
+def _safe_confidence(data: dict) -> float | None:
+    value = data.get("Overall Confidence")
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _should_use_llm(data: dict, status: str, text: str) -> bool:
+    final_amount_missing = _is_missing(data.get("Final Amount"))
+    invoice_number_missing = _is_missing(data.get("Invoice Number"))
+    validation_failed = _is_validation_failed(status)
+    confidence = _safe_confidence(data)
+    confidence_low = confidence is not None and confidence < 0.75
+    text_quality_poor = _text_quality_is_poor(text)
+
+    return bool(
+        data.get("Requires Manual Review")
+        or final_amount_missing
+        or invoice_number_missing
+        or validation_failed
+        or confidence_low
+        or text_quality_poor
+    )
+
+
+def _status_rank(status: str) -> int:
+    ranking = {
+        "VALID": 6,
+        "VALID (NON-GST)": 5,
+        "Non GST Invoice": 4,
+        "FINAL AMOUNT MISSING": 3,
+        "REQUIRES MANUAL REVIEW": 2,
+        "INVALID DATA": 1,
+    }
+    return ranking.get(status, 0)
+
+
+def _apply_llm_updates_safely(original_data: dict, improved: dict) -> dict:
+    merged = dict(original_data)
+    for key in ("Invoice Number", "Invoice Date", "GST Amount"):
+        if key in improved and improved.get(key) not in (None, ""):
+            merged[key] = improved.get(key)
+
+    if "Final Amount" in improved and improved.get("Final Amount") not in (None, ""):
+        original_final = merged.get("Final Amount")
+        try:
+            merged["Final Amount"] = float(improved.get("Final Amount"))
+        except (TypeError, ValueError):
+            merged["Final Amount"] = original_final
+
+    return merged
+
 def _extract_data_from_document_input(document_input, source_file_name=None):
     text = extract_text_from_document(document_input, source_name=source_file_name)
 
@@ -70,6 +133,38 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
             data = retry_data
 
     status = validate_invoice(data)
+
+    data["_llm_used"] = False
+    data["_llm_improved"] = False
+
+    if _should_use_llm(data, status, text):
+        improved = refine_with_llm(text, data)
+        if isinstance(improved, dict) and improved and improved is not data:
+            original_data = dict(data)
+            original_status = status
+
+            candidate_data = _apply_llm_updates_safely(data, improved)
+            candidate_status = validate_invoice(candidate_data)
+
+            original_score = _status_rank(original_status)
+            candidate_score = _status_rank(candidate_status)
+            original_conf = _safe_confidence(original_data) or 0.0
+            candidate_conf = _safe_confidence(candidate_data) or 0.0
+
+            candidate_better = (
+                candidate_score > original_score
+                or (candidate_score == original_score and candidate_conf >= original_conf)
+            )
+
+            data["_llm_used"] = True
+            if candidate_better:
+                data = candidate_data
+                status = candidate_status
+                data["_llm_improved"] = True
+            else:
+                data = original_data
+                status = original_status
+                data["_llm_improved"] = False
 
     if source_file_name:
         data["Source File Name"] = os.path.basename(source_file_name)
