@@ -56,6 +56,8 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
+SIMPLE_SUPPORTED_MIME_TYPES = {"application/pdf", "image/jpeg", "image/png"}
+SIMPLE_SUPPORTED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
 
 ALLOWED_INPUT_MIME_TYPES = {
     "application/pdf",
@@ -173,6 +175,17 @@ def is_supported_mime_for_extension(content_type: str, extension: str) -> bool:
     return content_type.lower() in allowed_mimes
 
 
+def detect_supported_upload_type(filename: str, content_type: str) -> str | None:
+    extension = get_file_extension(filename)
+    normalized_mime = (content_type or "").lower().strip()
+
+    if normalized_mime in SIMPLE_SUPPORTED_MIME_TYPES:
+        return "pdf" if normalized_mime == "application/pdf" else "image"
+
+    if extension in SIMPLE_SUPPORTED_EXTENSIONS:
+        return "pdf" if extension == ".pdf" else "image"
+
+    return None
 
 
 def _is_likely_pdf(file_bytes: bytes) -> bool:
@@ -329,21 +342,11 @@ async def upload_invoice(
     extension = get_file_extension(original_filename)
     mime_type = (file.content_type or "").lower().strip()
 
-    if extension == ".docm":
+    detected_file_type = detect_supported_upload_type(original_filename, mime_type)
+    if not detected_file_type:
         return JSONResponse(
             status_code=400,
-            content={"error": "Macro-enabled Word files (.docm) are not supported."},
-        )
-
-    if not is_supported_invoice_filename(original_filename):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Unsupported file extension. Upload PDF, DOC, DOCX, PNG, JPG, JPEG, WEBP, TIFF, or BMP."},
-        )
-    if mime_type not in ALLOWED_INPUT_MIME_TYPES or not is_supported_mime_for_extension(mime_type, extension):
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"File type mismatch. Extension '{extension}' is not valid for MIME '{mime_type or 'unknown'}'."},
+            content={"error": "Unsupported file type. Upload PDF, JPG, JPEG, or PNG."},
         )
 
     enforce_upload_rate_limit(email, extension)
@@ -413,6 +416,9 @@ async def upload_invoice(
             "can_download_xml": True,
             "is_pro": False,
             "file_url": output_file_url,
+            "detected_file_type": data.get("Detected File Type", detected_file_type),
+            "extracted_data": data,
+            "confidence_score": data.get("confidence_score"),
             "data_summary": {
                 "invoice_no": data.get("Invoice Number"),
                 "date": data.get("Invoice Date"),
