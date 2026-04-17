@@ -27,7 +27,6 @@ from database import (
     create_or_get_user,
     get_user_by_email,
     get_user_by_id,
-    increment_usage_for_user,
     upgrade_user_to_pro,
     upload_invoice_pdf,
     download_invoice_pdf,
@@ -321,18 +320,10 @@ async def upload_invoice(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     output_format: str = Form("xlsx"),
-    current_user: dict = Depends(get_current_user),
 ):
+    print("Public upload endpoint hit")
     normalized_output_format = (output_format or "xlsx").strip().lower()
-    email = current_user["email"]
-    usage = int(current_user["usage_count"])
-    max_limit = int(current_user["max_limit"])
-
-    if usage >= max_limit:
-        return JSONResponse(
-            status_code=403,
-            content={"error": "Limit reached", "upgrade_required": True},
-        )
+    email = "public-upload"
 
     original_filename = os.path.basename(file.filename or "")
     extension = get_file_extension(original_filename)
@@ -401,10 +392,6 @@ async def upload_invoice(
         invoice_pdf_url = get_public_invoice_url(storage_path)
         save_invoice_metadata(email, data, invoice_pdf_url, status)
 
-        updated_user = increment_usage_for_user(current_user["id"])
-        usage_count = int(updated_user["usage_count"])
-        remaining = max(0, int(updated_user["max_limit"]) - usage_count)
-
         gst_total = (
             (data.get("CGST Amount") or 0)
             + (data.get("SGST Amount") or 0)
@@ -421,10 +408,10 @@ async def upload_invoice(
 
         return {
             "success": True,
-            "remaining": remaining,
-            "usage_count": usage_count,
-            "can_download_xml": usage_count <= int(updated_user["max_limit"]),
-            "is_pro": bool(updated_user["is_pro"]),
+            "remaining": None,
+            "usage_count": None,
+            "can_download_xml": True,
+            "is_pro": False,
             "file_url": output_file_url,
             "data_summary": {
                 "invoice_no": data.get("Invoice Number"),
