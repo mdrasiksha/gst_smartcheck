@@ -7,6 +7,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from ocr import extract_text_from_document
 from extractor_wrapper import extract_with_audit
 from validators import validate_invoice
+from validator import validate_invoice as validate_invoice_structured
+from layout_extractor import extract_layout_fields
+from ai_extractor import extract_invoice_fields_gpt
 from excel_writer import write_to_excel
 from llm_refiner import refine_with_llm
 from cache_helper import get_cached_invoice_result, set_cached_invoice_result
@@ -15,6 +18,16 @@ from cache_helper import get_cached_invoice_result, set_cached_invoice_result
 logger = logging.getLogger(__name__)
 _LLM_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 _INVALID_TEXT_VALUES = {"", ".", "-", "missing", "na", "null", "n/a", "unknown", "original"}
+_PIPELINE_FIELDS = (
+    "Invoice Number",
+    "Invoice Date",
+    "GST Number",
+    "Taxable Amount",
+    "CGST Amount",
+    "SGST Amount",
+    "IGST Amount",
+    "Final Amount",
+)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -267,6 +280,39 @@ def _status_rank(status: str) -> int:
     return ranking.get(status, 0)
 
 
+def _layout_to_standard_fields(layout_data: dict) -> dict:
+    return {
+        "Invoice Number": layout_data.get("invoice_number") or None,
+        "Invoice Date": layout_data.get("date") or None,
+        "GST Number": (layout_data.get("gstin") or "").upper() or None,
+        "Taxable Amount": _to_float(layout_data.get("taxable_amount")),
+        "CGST Amount": _to_float(layout_data.get("cgst")),
+        "SGST Amount": _to_float(layout_data.get("sgst")),
+        "IGST Amount": _to_float(layout_data.get("igst")),
+        "Final Amount": _to_float(layout_data.get("total")),
+        "_line_items": layout_data.get("line_items") or [],
+    }
+
+
+def _merge_prefer_existing(primary: dict, secondary: dict) -> dict:
+    merged = dict(primary)
+    for field in _PIPELINE_FIELDS:
+        if _is_missing(merged.get(field)) and not _is_missing(secondary.get(field)):
+            merged[field] = secondary.get(field)
+    if secondary.get("_line_items") and not merged.get("_line_items"):
+        merged["_line_items"] = secondary.get("_line_items")
+    return merged
+
+
+def _compute_confidence_score(data: dict, ocr_payload: dict, validation_result: dict) -> float:
+    ocr_component = max(0.0, min(float(ocr_payload.get("avg_confidence", 0.0)), 100.0))
+    filled = sum(1 for field in _PIPELINE_FIELDS if not _is_missing(data.get(field)))
+    completeness_component = (filled / len(_PIPELINE_FIELDS)) * 100.0
+    validation_component = 100.0 if validation_result.get("is_valid") else 35.0
+    score = (0.5 * ocr_component) + (0.3 * completeness_component) + (0.2 * validation_component)
+    return round(max(0.0, min(score, 100.0)), 2)
+
+
 def _apply_llm_updates_safely(original_data: dict, improved: dict) -> dict:
     merged = dict(original_data)
 
@@ -300,7 +346,12 @@ def _apply_llm_updates_safely(original_data: dict, improved: dict) -> dict:
 def _extract_data_from_document_input(document_input, source_file_name=None):
     total_start = time.time()
     ocr_start = time.time()
-    text = extract_text_from_document(document_input, source_name=source_file_name)
+    ocr_payload = extract_text_from_document(
+        document_input,
+        source_name=source_file_name,
+        return_ocr_data=True,
+    )
+    text = (ocr_payload or {}).get("text", "")
     ocr_end = time.time()
     logger.info("perf source=%s stage=ocr duration=%.3fs", source_file_name or "unknown", ocr_end - ocr_start)
 
@@ -308,13 +359,21 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
         raise ValueError("OCR failed or insufficient text extracted")
 
     extraction_start = time.time()
-    data = extract_with_audit(text)
+    layout_data = extract_layout_fields(ocr_payload)
+    regex_data = extract_with_audit(text)
+    data = _merge_prefer_existing(regex_data, _layout_to_standard_fields(layout_data))
     extraction_end = time.time()
     logger.info("perf source=%s stage=extract duration=%.3fs", source_file_name or "unknown", extraction_end - extraction_start)
 
     if _should_retry_force_ocr(data, text):
         retry_ocr_start = time.time()
-        retry_text = extract_text_from_document(document_input, force_ocr=True, source_name=source_file_name)
+        retry_payload = extract_text_from_document(
+            document_input,
+            force_ocr=True,
+            source_name=source_file_name,
+            return_ocr_data=True,
+        )
+        retry_text = (retry_payload or {}).get("text", "")
         retry_ocr_end = time.time()
         logger.info("perf source=%s stage=ocr_retry duration=%.3fs", source_file_name or "unknown", retry_ocr_end - retry_ocr_start)
 
@@ -324,6 +383,7 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
         logger.info("perf source=%s stage=extract_retry duration=%.3fs", source_file_name or "unknown", retry_extract_end - retry_extract_start)
         if not retry_data.get("Requires Manual Review"):
             data = retry_data
+            ocr_payload = retry_payload
 
     data = _fix_gst_calculation(data, text)
     if not _is_valid_value(data.get("Invoice Number")):
@@ -331,17 +391,21 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
     if not _is_valid_value(data.get("Vendor Name")):
         data["Vendor Name"] = None
     status = validate_invoice(data)
+    structured_validation = validate_invoice_structured(data)
+    data["validation_errors"] = structured_validation.get("errors", [])
 
     data["_llm_used"] = False
     data["_llm_improved"] = False
     data["_calc_mismatch"] = _is_calculation_incorrect(data)
     data["_llm_fix_applied"] = False
 
+    data["confidence_score"] = _compute_confidence_score(data, ocr_payload, structured_validation)
+
     llm_future = None
     llm_start = None
-    if _should_use_llm(data, status, text):
+    if data["confidence_score"] < 70 or (not structured_validation.get("is_valid")) or _should_use_llm(data, status, text):
         llm_start = time.time()
-        llm_future = _LLM_EXECUTOR.submit(refine_with_llm, text, data)
+        llm_future = _LLM_EXECUTOR.submit(extract_invoice_fields_gpt, text, data, 2)
 
     if llm_future is not None:
         improved = None
@@ -359,6 +423,7 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
             candidate_data = _apply_llm_updates_safely(data, improved)
             candidate_is_consistent = not _is_calculation_incorrect(candidate_data)
             candidate_status = validate_invoice(candidate_data)
+            candidate_validation = validate_invoice_structured(candidate_data)
 
             original_score = _status_rank(original_status)
             candidate_score = _status_rank(candidate_status)
@@ -376,6 +441,7 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
                 status = candidate_status
                 data["_llm_improved"] = True
                 data["_llm_fix_applied"] = True
+                data["validation_errors"] = candidate_validation.get("errors", [])
             else:
                 data = original_data
                 status = original_status
@@ -383,6 +449,7 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
                 data["_llm_fix_applied"] = False
 
     data["_calc_mismatch"] = _is_calculation_incorrect(data)
+    data["confidence_score"] = _compute_confidence_score(data, ocr_payload, validate_invoice_structured(data))
     if not _is_valid_value(data.get("Invoice Number")):
         raise ValueError("Unable to extract invoice number")
 

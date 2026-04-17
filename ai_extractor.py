@@ -3,6 +3,10 @@ import os
 import re
 from typing import Dict
 from urllib import error, request
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
 from word2number import w2n
 
@@ -1328,6 +1332,75 @@ def _extract_json_object(payload: str) -> Dict:
         return {}
 
 
+def _extract_with_gpt(text: str, existing_data: Dict | None = None, retries: int = 2) -> Dict:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key or OpenAI is None:
+        return {}
+
+    schema = {
+        "Invoice Number": None,
+        "Invoice Date": None,
+        "GST Number": None,
+        "Taxable Amount": None,
+        "CGST Amount": None,
+        "SGST Amount": None,
+        "IGST Amount": None,
+        "Final Amount": None,
+    }
+    validation_rules = [
+        "Return strict JSON object only with schema keys, no markdown.",
+        "Handle OCR noise such as O/0, I/1, S/5 confusion.",
+        "Do not treat percentage rates (e.g., 18%) as tax amounts.",
+        "Final Amount should approximately equal Taxable + CGST + SGST + IGST.",
+        "Use null for missing values.",
+    ]
+    client = OpenAI(api_key=api_key)
+    content = {
+        "schema": schema,
+        "validation_rules": validation_rules,
+        "existing_data": existing_data or {},
+        "ocr_text": text[:8000],
+    }
+
+    for _ in range(max(1, retries + 1)):
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                temperature=0,
+                response_format={"type": "json_object"},
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Extract invoice fields from OCR text using the provided schema and rules. "
+                            "Return strict JSON only."
+                        ),
+                    },
+                    {"role": "user", "content": json.dumps(content, ensure_ascii=False)},
+                ],
+                timeout=8,
+            )
+            payload = response.choices[0].message.content or ""
+            parsed = _extract_json_object(payload)
+            if parsed:
+                return {
+                    "Invoice Number": parsed.get("Invoice Number"),
+                    "Invoice Date": parsed.get("Invoice Date"),
+                    "GST Number": parsed.get("GST Number"),
+                    "Taxable Amount": _coerce_float(parsed.get("Taxable Amount")),
+                    "Sub Total": _coerce_float(parsed.get("Taxable Amount")),
+                    "CGST Amount": _coerce_float(parsed.get("CGST Amount")) or 0.0,
+                    "SGST Amount": _coerce_float(parsed.get("SGST Amount")) or 0.0,
+                    "IGST Amount": _coerce_float(parsed.get("IGST Amount")) or 0.0,
+                    "Final Amount": _coerce_float(parsed.get("Final Amount")),
+                    "Is GST Invoice": bool(parsed.get("GST Number")),
+                    "_rules_applied": ["AI_GPT4O_MINI_EXTRACTION"],
+                }
+        except Exception:
+            continue
+    return {}
+
+
 def _extract_with_gemini(text: str) -> Dict:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -1412,3 +1485,10 @@ def extract_invoice_fields(text: str) -> dict:
         if ai_data:
             return run_validation_engine(normalize_text(text), ai_data)
     return _extract_invoice_fields_regex(text)
+
+
+def extract_invoice_fields_gpt(text: str, existing_data: Dict | None = None, retries: int = 2) -> dict:
+    ai_data = _extract_with_gpt(text, existing_data=existing_data, retries=retries)
+    if ai_data:
+        return run_validation_engine(normalize_text(text), ai_data)
+    return {}
