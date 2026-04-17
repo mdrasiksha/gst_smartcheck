@@ -33,6 +33,123 @@ def _preprocess_image_for_ocr(image):
     return denoised
 
 
+
+
+def _resize_large_image_cv(image, max_dim: int = 2400):
+    import cv2
+
+    h, w = image.shape[:2]
+    largest = max(h, w)
+    if largest <= max_dim:
+        return image
+    scale = max_dim / float(largest)
+    return cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+
+def _auto_orient_image_cv(image):
+    import cv2
+    import pytesseract
+
+    # Try cardinal rotations and keep the orientation with richest OCR token count.
+    candidates = [
+        image,
+        cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE),
+        cv2.rotate(image, cv2.ROTATE_180),
+        cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE),
+    ]
+    best = image
+    best_count = -1
+    for candidate in candidates:
+        gray = cv2.cvtColor(candidate, cv2.COLOR_BGR2GRAY)
+        try:
+            data = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT, config="--psm 6")
+            count = sum(1 for token in data.get("text", []) if (token or "").strip())
+            if count > best_count:
+                best_count = count
+                best = candidate
+        except Exception:
+            continue
+    return best
+
+
+def extract_text_from_image(file_bytes: bytes) -> dict:
+    """
+    OCR a JPG/JPEG/PNG image using OpenCV preprocessing + pytesseract.image_to_data.
+
+    Returns:
+      {
+        "text": str,
+        "words": [{text, x, y, width, height, confidence, page}],
+        "avg_confidence": float,
+      }
+    """
+    if not file_bytes:
+        raise ValueError("Empty image input.")
+    try:
+        import cv2
+        import numpy as np
+        import pytesseract
+    except Exception as exc:
+        raise OCREngineError("OpenCV/pytesseract are required for image OCR.") from exc
+
+    np_bytes = np.frombuffer(file_bytes, dtype=np.uint8)
+    image = cv2.imdecode(np_bytes, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("Unsupported or corrupt image input.")
+
+    image = _resize_large_image_cv(image)
+    image = _auto_orient_image_cv(image)
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    denoised = cv2.fastNlMeansDenoising(gray, None, 12, 7, 21)
+    threshold = cv2.adaptiveThreshold(
+        denoised,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        11,
+    )
+
+    raw = pytesseract.image_to_data(
+        threshold,
+        output_type=pytesseract.Output.DICT,
+        config="--oem 3 --psm 6",
+    )
+
+    words = []
+    full_tokens = []
+    confidences = []
+    for i, token in enumerate(raw.get("text", [])):
+        text = (token or "").strip()
+        try:
+            conf = float(raw.get("conf", [])[i])
+        except (TypeError, ValueError, IndexError):
+            conf = -1.0
+        if not text:
+            continue
+        words.append(
+            {
+                "text": text,
+                "x": int(raw.get("left", [0])[i]),
+                "y": int(raw.get("top", [0])[i]),
+                "width": int(raw.get("width", [0])[i]),
+                "height": int(raw.get("height", [0])[i]),
+                "confidence": round(max(conf, 0.0), 2),
+                "page": 1,
+            }
+        )
+        full_tokens.append(text)
+        if conf >= 0:
+            confidences.append(conf)
+
+    return {
+        "text": " ".join(full_tokens).strip(),
+        "words": words,
+        "avg_confidence": round(sum(confidences) / len(confidences), 2) if confidences else 0.0,
+    }
+
+
 def _image_to_data_dict(image, page_num: int = 1) -> dict:
     import pytesseract
 
@@ -398,15 +515,10 @@ def _extract_text_with_ocr(pdf_input: PdfInput) -> dict:
 
 def _extract_text_with_ocr_image(image_input: PdfInput) -> dict:
     """OCR a non-PDF image input with Tesseract."""
-    from PIL import Image
-    import pytesseract
-
     if isinstance(image_input, bytes):
-        image = Image.open(BytesIO(image_input))
-    else:
-        image = Image.open(image_input)
-
-    return _image_to_data_dict(image, page_num=1)
+        return extract_text_from_image(image_input)
+    with open(image_input, "rb") as image_file:
+        return extract_text_from_image(image_file.read())
 
 
 def _contains_invoice_anchors(text: str) -> bool:
@@ -592,3 +704,9 @@ def extract_text_from_document(
             "avg_confidence": ocr_payload.get("avg_confidence", 0.0),
         }
     return merged_text
+    try:
+        import cv2
+        import numpy as np
+        import pytesseract
+    except Exception as exc:
+        raise OCREngineError("OpenCV/pytesseract are required for image OCR.") from exc

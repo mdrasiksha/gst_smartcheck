@@ -4,7 +4,7 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from ocr import extract_text_from_document
+from ocr import extract_text_from_document, extract_text_from_image, extract_text_from_pdf
 from extractor_wrapper import extract_with_audit
 from validators import validate_invoice
 from validator import validate_invoice as validate_invoice_structured
@@ -49,6 +49,21 @@ def _env_int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _detect_file_type(document_input, source_file_name: str | None = None) -> str:
+    file_name = (source_file_name or "").lower()
+    if isinstance(document_input, (bytes, bytearray)):
+        file_bytes = bytes(document_input)
+        if file_bytes.startswith(b"%PDF-"):
+            return "pdf"
+        if file_bytes.startswith(b"\x89PNG\r\n\x1a\n") or file_bytes.startswith(b"\xff\xd8\xff"):
+            return "image"
+    if file_name.endswith(".pdf"):
+        return "pdf"
+    if file_name.endswith((".jpg", ".jpeg", ".png")):
+        return "image"
+    return "pdf"
 
 
 def _text_quality_is_poor(text: str) -> bool:
@@ -343,14 +358,28 @@ def _apply_llm_updates_safely(original_data: dict, improved: dict) -> dict:
     merged = _recalculate_total(merged)
     return merged
 
-def _extract_data_from_document_input(document_input, source_file_name=None):
+def _extract_data_from_document_input(document_input, source_file_name=None, detected_file_type=None):
     total_start = time.time()
     ocr_start = time.time()
-    ocr_payload = extract_text_from_document(
-        document_input,
-        source_name=source_file_name,
-        return_ocr_data=True,
-    )
+    if detected_file_type == "image":
+        if isinstance(document_input, (bytes, bytearray)):
+            ocr_payload = extract_text_from_image(bytes(document_input))
+        else:
+            with open(document_input, "rb") as image_file:
+                ocr_payload = extract_text_from_image(image_file.read())
+    elif detected_file_type == "pdf":
+        ocr_payload = extract_text_from_pdf(
+            document_input,
+            force_ocr=False,
+        )
+        if isinstance(ocr_payload, str):
+            ocr_payload = {"text": ocr_payload, "words": [], "avg_confidence": 100.0}
+    else:
+        ocr_payload = extract_text_from_document(
+            document_input,
+            source_name=source_file_name,
+            return_ocr_data=True,
+        )
     text = (ocr_payload or {}).get("text", "")
     ocr_end = time.time()
     logger.info("perf source=%s stage=ocr duration=%.3fs", source_file_name or "unknown", ocr_end - ocr_start)
@@ -365,7 +394,7 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
     extraction_end = time.time()
     logger.info("perf source=%s stage=extract duration=%.3fs", source_file_name or "unknown", extraction_end - extraction_start)
 
-    if _should_retry_force_ocr(data, text):
+    if detected_file_type != "image" and _should_retry_force_ocr(data, text):
         retry_ocr_start = time.time()
         retry_payload = extract_text_from_document(
             document_input,
@@ -462,7 +491,13 @@ def _extract_data_from_document_input(document_input, source_file_name=None):
 
 def process_invoice(pdf_path, output_path, source_file_name=None):
     resolved_source_file_name = source_file_name or pdf_path
-    data, status = _extract_data_from_document_input(pdf_path, source_file_name=resolved_source_file_name)
+    detected_file_type = _detect_file_type(pdf_path, source_file_name=resolved_source_file_name)
+    data, status = _extract_data_from_document_input(
+        pdf_path,
+        source_file_name=resolved_source_file_name,
+        detected_file_type=detected_file_type,
+    )
+    data["Detected File Type"] = detected_file_type
     write_to_excel(data, status, output_path, source_file_name=resolved_source_file_name)
     return data, status
 
@@ -472,11 +507,19 @@ def process_invoice_bytes(pdf_bytes, output_path, source_file_name=None, write_e
     cached = get_cached_invoice_result(pdf_bytes)
     if cached is not None:
         data, status = cached
+        if "Detected File Type" not in data:
+            data["Detected File Type"] = _detect_file_type(pdf_bytes, source_file_name=source_file_name)
         if source_file_name:
             data["Source File Name"] = os.path.basename(source_file_name)
         logger.info("perf source=%s stage=cache_hit duration=%.3fs", source_file_name or "unknown", time.time() - start)
     else:
-        data, status = _extract_data_from_document_input(pdf_bytes, source_file_name=source_file_name)
+        detected_file_type = _detect_file_type(pdf_bytes, source_file_name=source_file_name)
+        data, status = _extract_data_from_document_input(
+            pdf_bytes,
+            source_file_name=source_file_name,
+            detected_file_type=detected_file_type,
+        )
+        data["Detected File Type"] = detected_file_type
         set_cached_invoice_result(pdf_bytes, data, status)
     if write_excel_file:
         write_to_excel(data, status, output_path, source_file_name=source_file_name)
