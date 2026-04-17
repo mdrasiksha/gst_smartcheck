@@ -97,6 +97,7 @@ JWT_EXPIRY_DAYS = 7
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
 RATE_WINDOW = defaultdict(deque)
 logger = logging.getLogger("invoice_upload")
+emails: list[str] = []
 
 
 class LoginRequest(BaseModel):
@@ -361,8 +362,17 @@ async def upload_invoice(
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     if not check_limit(user):
-        logger.info("upload_limit_exceeded api_key=%s plan=%s usage=%d", x_api_key, user["plan"], user["usage"])
-        raise HTTPException(status_code=403, detail="Usage limit exceeded")
+        logger.info(
+            "upload_limit_exceeded api_key=%s plan=%s usage=%d file=%s",
+            x_api_key,
+            user["plan"],
+            user["usage"],
+            os.path.basename(file.filename or "unknown"),
+        )
+        return JSONResponse(
+            status_code=403,
+            content={"message": "Free limit reached. Upgrade coming soon."},
+        )
 
     original_filename = os.path.basename(file.filename or "")
     extension = get_file_extension(original_filename)
@@ -384,7 +394,16 @@ async def upload_invoice(
             content={"error": f"File too large. Maximum supported size is {MAX_UPLOAD_BYTES // (1024 * 1024)}MB."},
         )
     ensure_not_infected(file_bytes)
-    logger.info("invoice_upload type=%s mime=%s email=%s size=%d", extension, mime_type, email, len(file_bytes))
+    logger.info(
+        "invoice_upload api_key=%s type=%s mime=%s email=%s size=%d file=%s usage=%d",
+        x_api_key,
+        extension,
+        mime_type,
+        email,
+        len(file_bytes),
+        original_filename,
+        user["usage"],
+    )
 
     unique_id = str(uuid.uuid4())
     storage_file_name = build_storage_input_name(unique_id, original_filename)
@@ -427,8 +446,22 @@ async def upload_invoice(
             + (data.get("IGST Amount") or 0)
         )
         user["usage"] += 1
-        remaining = plans[user["plan"]]["limit"] - user["usage"]
-        logger.info("upload_usage_incremented api_key=%s plan=%s usage=%d remaining=%d", x_api_key, user["plan"], user["usage"], remaining)
+        remaining = max(0, plans[user["plan"]]["limit"] - user["usage"])
+
+        dynamic_message = "You have free uploads available."
+        if remaining <= 3:
+            dynamic_message = "You are nearing your free limit 🚀"
+        if remaining == 0:
+            dynamic_message = "Free limit reached. Upgrade coming soon."
+
+        logger.info(
+            "upload_usage_incremented api_key=%s plan=%s usage=%d remaining=%d file=%s",
+            x_api_key,
+            user["plan"],
+            user["usage"],
+            remaining,
+            original_filename,
+        )
 
         if normalized_output_format == "xml":
             xml_payload = build_tally_voucher_xml(data)
@@ -438,11 +471,7 @@ async def upload_invoice(
                 headers={"Content-Disposition": f'attachment; filename="{xml_file_name}"'},
             )
 
-        return {
-            "success": True,
-            "usage": user["usage"],
-            "remaining": remaining,
-            "plan": user["plan"],
+        result = {
             "can_download_xml": True,
             "is_pro": user["plan"] == "pro",
             "file_url": output_file_url,
@@ -462,6 +491,14 @@ async def upload_invoice(
                 "overall": data.get("Overall Confidence"),
                 "fields": data.get("Field Confidence", {}),
             },
+        }
+
+        return {
+            "data": result,
+            "usage": user["usage"],
+            "remaining": remaining,
+            "plan": user["plan"],
+            "message": dynamic_message,
         }
     finally:
         # 5) Retain generated files for download; cleanup removes files older than 24h
@@ -626,6 +663,24 @@ async def download_excel(filename: str):
         media_type=XLSX_MEDIA_TYPE,
         headers={"Content-Disposition": f'attachment; filename="{download_filename}"'},
     )
+
+
+@app.post("/collect-email")
+async def collect_email(email: str = Form(...)):
+    normalized_email = _normalize_email(email)
+    if not normalized_email or "@" not in normalized_email:
+        raise HTTPException(status_code=400, detail="Valid email is required.")
+
+    emails.append(normalized_email)
+
+    try:
+        with open("emails.txt", "a", encoding="utf-8") as email_file:
+            email_file.write(f"{normalized_email}\n")
+    except OSError as exc:
+        logger.warning("email_file_write_failed email=%s error=%s", normalized_email, exc)
+
+    logger.info("collect_email email=%s total=%d", normalized_email, len(emails))
+    return {"message": "Thanks! We’ll notify you."}
 
 
 @app.get("/test")
