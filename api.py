@@ -97,7 +97,6 @@ JWT_EXPIRY_DAYS = 7
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
 RATE_WINDOW = defaultdict(deque)
 logger = logging.getLogger("invoice_upload")
-emails: list[str] = []
 
 
 class LoginRequest(BaseModel):
@@ -671,16 +670,28 @@ async def collect_email(email: str = Form(...)):
     if not normalized_email or "@" not in normalized_email:
         raise HTTPException(status_code=400, detail="Valid email is required.")
 
-    emails.append(normalized_email)
+    file_path = "emails.txt"
 
     try:
-        with open("emails.txt", "a", encoding="utf-8") as email_file:
+        if not os.path.exists(file_path):
+            with open(file_path, "w", encoding="utf-8"):
+                pass
+
+        with open(file_path, "r", encoding="utf-8") as email_file:
+            existing_emails = {line.strip().lower() for line in email_file if line.strip()}
+
+        if normalized_email in existing_emails:
+            return {"message": "Email already registered"}
+
+        with open(file_path, "a", encoding="utf-8") as email_file:
             email_file.write(f"{normalized_email}\n")
     except OSError as exc:
         logger.warning("email_file_write_failed email=%s error=%s", normalized_email, exc)
+        raise HTTPException(status_code=500, detail="Unable to save email right now.") from exc
 
-    logger.info("collect_email email=%s total=%d", normalized_email, len(emails))
-    return {"message": "Thanks! We’ll notify you."}
+    print(f"New email collected: {normalized_email}")
+    logger.info("collect_email email=%s", normalized_email)
+    return {"message": "Thanks! We’ll notify you 🚀"}
 
 
 @app.get("/test")
