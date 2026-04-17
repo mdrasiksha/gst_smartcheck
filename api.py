@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, Query, Request, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, UploadFile, File, Form, Query, Request, HTTPException, BackgroundTasks, Depends, Header
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -38,6 +38,7 @@ from database import (
 from main import process_invoice_bytes, process_invoices_bulk
 from ocr import OCREngineError, PDFExtractionError
 from tally_writer import build_tally_voucher_xml
+from gst_smartcheck.user_store import users, plans
 
 app = FastAPI()
 
@@ -157,6 +158,21 @@ def get_current_user(request: Request) -> dict:
     if not user:
         raise HTTPException(status_code=401, detail="User not found for token.")
     return user
+
+
+def get_api_key(x_api_key: str = Header(None)):
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="Missing API key")
+    return x_api_key
+
+
+def check_limit(user):
+    plan = user["plan"]
+    limit = plans[plan]["limit"]
+
+    if user["usage"] >= limit:
+        return False
+    return True
 
 
 def is_supported_invoice_filename(filename: str) -> bool:
@@ -333,10 +349,20 @@ async def upload_invoice(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     output_format: str = Form("xlsx"),
+    x_api_key: str = Depends(get_api_key),
 ):
     print("Public upload endpoint hit")
     normalized_output_format = (output_format or "xlsx").strip().lower()
     email = "public-upload"
+    user = users.get(x_api_key)
+
+    if not user:
+        logger.warning("upload_auth_failed invalid_api_key=%s", x_api_key)
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if not check_limit(user):
+        logger.info("upload_limit_exceeded api_key=%s plan=%s usage=%d", x_api_key, user["plan"], user["usage"])
+        raise HTTPException(status_code=403, detail="Usage limit exceeded")
 
     original_filename = os.path.basename(file.filename or "")
     extension = get_file_extension(original_filename)
@@ -400,6 +426,9 @@ async def upload_invoice(
             + (data.get("SGST Amount") or 0)
             + (data.get("IGST Amount") or 0)
         )
+        user["usage"] += 1
+        remaining = plans[user["plan"]]["limit"] - user["usage"]
+        logger.info("upload_usage_incremented api_key=%s plan=%s usage=%d remaining=%d", x_api_key, user["plan"], user["usage"], remaining)
 
         if normalized_output_format == "xml":
             xml_payload = build_tally_voucher_xml(data)
@@ -411,10 +440,11 @@ async def upload_invoice(
 
         return {
             "success": True,
-            "remaining": None,
-            "usage_count": None,
+            "usage": user["usage"],
+            "remaining": remaining,
+            "plan": user["plan"],
             "can_download_xml": True,
-            "is_pro": False,
+            "is_pro": user["plan"] == "pro",
             "file_url": output_file_url,
             "detected_file_type": data.get("Detected File Type", detected_file_type),
             "extracted_data": data,
