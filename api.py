@@ -694,6 +694,24 @@ async def collect_email(email: str = Form(...)):
     return {"message": "Thanks! We’ll notify you 🚀"}
 
 
+@app.get("/emails")
+async def get_emails():
+    # TEMP DEBUG API - remove in production
+    file_path = "emails.txt"
+    if not os.path.exists(file_path):
+        print("Emails fetched: 0")
+        return {"emails": [], "count": 0}
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as email_file:
+            email_list = [line.strip() for line in email_file.readlines() if line.strip()]
+    except OSError:
+        return {"emails": [], "error": "Unable to read file"}
+
+    print(f"Emails fetched: {len(email_list)}")
+    return {"emails": email_list, "count": len(email_list)}
+
+
 @app.get("/test")
 def test():
     return {"status": "CORS version running"}
