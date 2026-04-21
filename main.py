@@ -10,6 +10,7 @@ from validators import validate_invoice
 from validator import validate_invoice as validate_invoice_structured
 from layout_extractor import extract_layout_fields
 from ai_extractor import extract_invoice_fields_gpt
+from gst_smartcheck.ai_extractor import extract_with_gpt
 from excel_writer import write_to_excel
 from llm_refiner import refine_with_llm
 from cache_helper import get_cached_invoice_result, set_cached_invoice_result
@@ -381,6 +382,7 @@ def _extract_data_from_document_input(document_input, source_file_name=None, det
             return_ocr_data=True,
         )
     text = (ocr_payload or {}).get("text", "")
+    print("OCR TEXT:", text[:300])
     ocr_end = time.time()
     logger.info("perf source=%s stage=ocr duration=%.3fs", source_file_name or "unknown", ocr_end - ocr_start)
 
@@ -390,7 +392,23 @@ def _extract_data_from_document_input(document_input, source_file_name=None, det
     extraction_start = time.time()
     layout_data = extract_layout_fields(ocr_payload)
     regex_data = extract_with_audit(text)
+
+    if not regex_data or not regex_data.get("Final Amount"):
+        print("Using GPT extraction fallback...")
+        gpt_data = extract_with_gpt(text)
+        if isinstance(gpt_data, dict) and "error" not in gpt_data:
+            regex_data = {
+                "Invoice Number": gpt_data.get("invoice_number"),
+                "Invoice Date": gpt_data.get("date"),
+                "Taxable Amount": gpt_data.get("taxable_amount"),
+                "CGST Amount": gpt_data.get("cgst"),
+                "SGST Amount": gpt_data.get("sgst"),
+                "IGST Amount": gpt_data.get("igst"),
+                "Final Amount": gpt_data.get("final_amount"),
+            }
+
     data = _merge_prefer_existing(regex_data, _layout_to_standard_fields(layout_data))
+    print("FINAL RESULT:", data)
     extraction_end = time.time()
     logger.info("perf source=%s stage=extract duration=%.3fs", source_file_name or "unknown", extraction_end - extraction_start)
 
