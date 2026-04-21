@@ -5,39 +5,39 @@ import json
 client = OpenAI()
 
 
-def extract_with_gpt(ocr_text: str) -> dict:
-    prompt = f"""
-Extract structured GST invoice data.
+_REQUIRED_FIELDS = {
+    "invoice_number": "",
+    "date": "",
+    "taxable_amount": "",
+    "cgst": "",
+    "sgst": "",
+    "igst": "",
+    "final_amount": "",
+}
 
-Return STRICT JSON:
 
-{{
-  "invoice_number": "",
-  "date": "",
-  "taxable_amount": "",
-  "cgst": "",
-  "sgst": "",
-  "igst": "",
-  "final_amount": ""
-}}
+def _json_only_prompt(ocr_text: str) -> str:
+    return f"""Extract only these GST invoice fields and return strict JSON only:
+{json.dumps(_REQUIRED_FIELDS, indent=2)}
 
 Rules:
-- Prefer "Grand Total" for final_amount
-- Ignore handwritten notes
-- Handle proforma/quotation invoices
-- If not found, return null
-- Return only JSON (no explanation)
+- Use null for missing values
+- Do not return markdown
+- Do not include explanation or extra keys
 
-Invoice:
+Invoice text:
 <<<
-{ocr_text}
+{ocr_text[:3000]}
 >>>
 """
 
+
+def extract_with_gpt(ocr_text: str) -> dict:
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0
+        messages=[{"role": "user", "content": _json_only_prompt(ocr_text)}],
+        temperature=0,
+        max_tokens=250,
     )
 
     content = response.choices[0].message.content
@@ -60,7 +60,13 @@ def extract_from_image_with_gpt(image_bytes: bytes) -> dict:
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Extract GST invoice data. Return JSON only."},
+                    {
+                        "type": "text",
+                        "text": (
+                            "Extract only required GST fields: invoice_number, date, taxable_amount, "
+                            "cgst, sgst, igst, final_amount. Return strict JSON only with these keys."
+                        ),
+                    },
                     {
                         "type": "image_url",
                         "image_url": {
@@ -70,7 +76,8 @@ def extract_from_image_with_gpt(image_bytes: bytes) -> dict:
                 ]
             }
         ],
-        temperature=0
+        temperature=0,
+        max_tokens=250,
     )
 
     content = response.choices[0].message.content
