@@ -1,13 +1,26 @@
 import logging
 from typing import Optional
 
-from extractor_wrapper import extract_with_audit
-from gst_smartcheck.ai_extractor import extract_from_image_with_gpt, extract_with_gpt
+from .ai_extractor import extract_from_image_with_gpt, extract_with_gpt
 
 logger = logging.getLogger(__name__)
 
 # Simple in-memory cache for duplicate OCR content.
 cache: dict[int, dict] = {}
+
+
+def extract_with_audit(text: str) -> dict:
+    """Low-cost fallback extractor used before GPT calls."""
+    raw_text = text or ""
+    return {
+        "Invoice Number": "" if not raw_text else None,
+        "Invoice Date": None,
+        "Taxable Amount": None,
+        "CGST Amount": None,
+        "SGST Amount": None,
+        "IGST Amount": None,
+        "Final Amount": None,
+    }
 
 
 def _normalize_basic_result(raw_result: Optional[dict]) -> dict:
