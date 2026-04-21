@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+import logging
 from xml.etree import ElementTree as ET
 
 from pypdf import PdfReader
@@ -14,6 +15,7 @@ PdfInput = Union[str, bytes]
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"}
 _WORD_EXTENSIONS = {".docx", ".doc"}
+logger = logging.getLogger(__name__)
 
 
 class PDFExtractionError(Exception):
@@ -44,6 +46,51 @@ def _resize_large_image_cv(image, max_dim: int = 2400):
         return image
     scale = max_dim / float(largest)
     return cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+
+def _deskew_image_cv(image):
+    import cv2
+    import numpy as np
+
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image
+    coords = np.column_stack(np.where(gray < 250))
+    if coords.size == 0:
+        return image
+
+    angle = cv2.minAreaRect(coords)[-1]
+    if angle < -45:
+        angle = -(90 + angle)
+    else:
+        angle = -angle
+    if abs(angle) < 0.4:
+        return image
+
+    (h, w) = image.shape[:2]
+    center = (w // 2, h // 2)
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    return cv2.warpAffine(image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+
+def _preprocess_for_layout_ocr(image):
+    import cv2
+
+    resized = _resize_large_image_cv(image)
+    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+    contrast = cv2.convertScaleAbs(gray, alpha=1.4, beta=8)
+    threshold = cv2.adaptiveThreshold(
+        contrast,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        11,
+    )
+    denoised = cv2.fastNlMeansDenoising(threshold, None, 20, 7, 21)
+    deskewed = _deskew_image_cv(denoised)
+    return deskewed
 
 
 def _auto_orient_image_cv(image):
@@ -88,63 +135,50 @@ def extract_text_from_image(file_bytes: bytes) -> dict:
     try:
         import cv2
         import numpy as np
-        import pytesseract
+        from paddleocr import PaddleOCR
     except Exception as exc:
-        raise OCREngineError("OpenCV/pytesseract are required for image OCR.") from exc
+        raise OCREngineError("OpenCV/numpy/paddleocr are required for image OCR.") from exc
 
     np_bytes = np.frombuffer(file_bytes, dtype=np.uint8)
     image = cv2.imdecode(np_bytes, cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError("Unsupported or corrupt image input.")
 
-    image = _resize_large_image_cv(image)
     image = _auto_orient_image_cv(image)
-
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    denoised = cv2.fastNlMeansDenoising(gray, None, 12, 7, 21)
-    threshold = cv2.adaptiveThreshold(
-        denoised,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        31,
-        11,
-    )
-
-    raw = pytesseract.image_to_data(
-        threshold,
-        output_type=pytesseract.Output.DICT,
-        config="--oem 3 --psm 6",
-    )
+    preprocessed = _preprocess_for_layout_ocr(image)
+    ocr_engine = PaddleOCR(use_angle_cls=True, lang="en")
+    raw = ocr_engine.ocr(preprocessed, cls=True) or []
 
     words = []
     full_tokens = []
     confidences = []
-    for i, token in enumerate(raw.get("text", [])):
-        text = (token or "").strip()
-        try:
-            conf = float(raw.get("conf", [])[i])
-        except (TypeError, ValueError, IndexError):
-            conf = -1.0
+    lines = raw[0] if raw and isinstance(raw[0], list) else []
+    for line in lines:
+        if not isinstance(line, (list, tuple)) or len(line) != 2:
+            continue
+        box, text_conf = line
+        text, conf = (text_conf[0], text_conf[1]) if isinstance(text_conf, (list, tuple)) and len(text_conf) >= 2 else ("", 0.0)
+        text = (text or "").strip()
         if not text:
             continue
+        xs = [int(pt[0]) for pt in box] if box else [0]
+        ys = [int(pt[1]) for pt in box] if box else [0]
         words.append(
             {
                 "text": text,
-                "x": int(raw.get("left", [0])[i]),
-                "y": int(raw.get("top", [0])[i]),
-                "width": int(raw.get("width", [0])[i]),
-                "height": int(raw.get("height", [0])[i]),
-                "confidence": round(max(conf, 0.0), 2),
+                "x": min(xs),
+                "y": min(ys),
+                "width": max(xs) - min(xs),
+                "height": max(ys) - min(ys),
+                "confidence": round(float(conf or 0.0) * 100, 2),
                 "page": 1,
             }
         )
         full_tokens.append(text)
-        if conf >= 0:
-            confidences.append(conf)
+        confidences.append(float(conf or 0.0) * 100)
 
     return {
-        "text": " ".join(full_tokens).strip(),
+        "text": "\n".join(full_tokens).strip(),
         "words": words,
         "avg_confidence": round(sum(confidences) / len(confidences), 2) if confidences else 0.0,
     }
@@ -468,7 +502,6 @@ def _extract_text_with_ocr(pdf_input: PdfInput) -> dict:
       - tesseract binaries available in PATH
     """
     from pdf2image import convert_from_bytes, convert_from_path
-    import pytesseract
 
     # OCR rendering DPI controls (faster defaults than 300).
     dpi = _env_int("OCR_DPI", 220)
@@ -481,7 +514,12 @@ def _extract_text_with_ocr(pdf_input: PdfInput) -> dict:
 
     ocr_pages = []
     for page_index, image in enumerate(images):
-        page_data = _image_to_data_dict(image, page_num=page_index + 1)
+        rgb = image.convert("RGB")
+        page_bytes = BytesIO()
+        rgb.save(page_bytes, format="PNG")
+        page_data = extract_text_from_image(page_bytes.getvalue())
+        for word in page_data.get("words", []):
+            word["page"] = page_index + 1
         page_text = page_data.get("text", "")
 
         # If OCR text is weak, retry only this page once at fallback DPI.
@@ -502,10 +540,16 @@ def _extract_text_with_ocr(pdf_input: PdfInput) -> dict:
                 )
 
             if fallback_images:
-                fallback_text = (pytesseract.image_to_string(fallback_images[0], config="--psm 6") or "").strip()
+                fallback_rgb = fallback_images[0].convert("RGB")
+                fb_bytes = BytesIO()
+                fallback_rgb.save(fb_bytes, format="PNG")
+                fallback_data = extract_text_from_image(fb_bytes.getvalue())
+                fallback_text = fallback_data.get("text", "")
                 if len(fallback_text) > len(page_text):
-                    page_data = _image_to_data_dict(fallback_images[0], page_num=page_index + 1)
-                    page_text = page_data.get("text", "")
+                    page_data = fallback_data
+                    for word in page_data.get("words", []):
+                        word["page"] = page_index + 1
+                    page_text = fallback_text
 
         if page_text:
             ocr_pages.append(page_data)
