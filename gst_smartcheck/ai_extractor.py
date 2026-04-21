@@ -16,18 +16,38 @@ _REQUIRED_FIELDS = {
 }
 
 
+def _clean_ocr_text(text: str) -> str:
+    text = text or ""
+    text = text.replace("\n\n", "\n")
+    text = text.replace("  ", " ")
+    text = text.strip()
+    return text[:3000]
+
+
 def _json_only_prompt(ocr_text: str) -> str:
-    return f"""Extract only these GST invoice fields and return strict JSON only:
+    cleaned_text = _clean_ocr_text(ocr_text)
+    return f"""You are an expert in Indian GST invoice processing.
+
+Extract structured data and return STRICT JSON:
+
 {json.dumps(_REQUIRED_FIELDS, indent=2)}
 
 Rules:
-- Use null for missing values
-- Do not return markdown
-- Do not include explanation or extra keys
+- "final_amount" MUST be the final payable amount (Grand Total / Net Total)
+- If multiple totals exist, always choose final payable amount
+- Ignore handwritten text, stamps, logos
+- Handle quotation/proforma invoices
+- All values must be numeric (no commas, no ₹ symbol)
+- If missing, return null
+
+Validation rule:
+final_amount = taxable_amount + cgst + sgst + igst (if available)
+
+Return ONLY JSON (no explanation)
 
 Invoice text:
 <<<
-{ocr_text[:3000]}
+{cleaned_text}
 >>>
 """
 
@@ -62,10 +82,7 @@ def extract_from_image_with_gpt(image_bytes: bytes) -> dict:
                 "content": [
                     {
                         "type": "text",
-                        "text": (
-                            "Extract only required GST fields: invoice_number, date, taxable_amount, "
-                            "cgst, sgst, igst, final_amount. Return strict JSON only with these keys."
-                        ),
+                        "text": _json_only_prompt("Read this invoice image and extract fields."),
                     },
                     {
                         "type": "image_url",
