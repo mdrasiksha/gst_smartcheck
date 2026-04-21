@@ -41,7 +41,29 @@ def basic_extraction(text: str) -> dict:
     return _normalize_basic_result(extract_with_audit(text or ""))
 
 
-def calculate_confidence(result: dict) -> int:
+def validate_result(result: dict) -> bool:
+    try:
+        total = float(result.get("final_amount") or 0)
+        taxable = float(result.get("taxable_amount") or 0)
+        cgst = float(result.get("cgst") or 0)
+        sgst = float(result.get("sgst") or 0)
+        igst = float(result.get("igst") or 0)
+
+        calculated = taxable + cgst + sgst + igst
+
+        if total == 0:
+            return False
+
+        if abs(calculated - total) > 10:
+            return False
+
+        return True
+    except:
+        return False
+
+
+def calculate_confidence(result):
+
     score = 0
 
     if result.get("final_amount"):
@@ -50,14 +72,8 @@ def calculate_confidence(result: dict) -> int:
     if result.get("invoice_number"):
         score += 20
 
-    if result.get("date"):
-        score += 10
-
-    if result.get("taxable_amount"):
-        score += 20
-
-    if any(result.get(field) for field in ("cgst", "sgst", "igst")):
-        score += 10
+    if validate_result(result):
+        score += 40
 
     return score
 
@@ -67,7 +83,12 @@ def extract_invoice_smart(text: str, image_bytes: Optional[bytes] = None) -> dic
     Cost-optimized extraction route:
     OCR only -> GPT text -> GPT vision.
     """
-    text = (text or "")[:3000]
+    text = (text or "")
+    text = text.replace("\n\n", "\n")
+    text = text.replace("  ", " ")
+    text = text.strip()
+    text = text[:3000]
+    print("CLEAN TEXT:", text[:200])
     file_hash = hash(text)
 
     if file_hash in cache:
@@ -89,12 +110,64 @@ def extract_invoice_smart(text: str, image_bytes: Optional[bytes] = None) -> dic
         elif confidence >= 40:
             print("Using GPT TEXT extraction")
             method_name = "GPT_TEXT"
-            final_result = extract_with_gpt(text)
+            result = extract_with_gpt(text)
+            if not isinstance(result, dict) or "error" in result:
+                raise ValueError("GPT extraction failed")
+
+            if not validate_result(result):
+                print("Retrying GPT with correction prompt")
+
+                correction_prompt = f"""
+Previous extraction may be incorrect.
+
+Fix this result:
+{result}
+
+Ensure:
+- final_amount is correct payable amount
+- totals match tax calculation
+
+Return corrected JSON only.
+"""
+
+                corrected = extract_with_gpt(correction_prompt)
+                if isinstance(corrected, dict) and "error" not in corrected:
+                    result = corrected
+
+            print("GPT RESULT:", result)
+            print("CONFIDENCE:", calculate_confidence(result))
+            final_result = result
 
         elif image_bytes:
             print("Using GPT VISION extraction")
             method_name = "GPT_VISION"
-            final_result = extract_from_image_with_gpt(image_bytes)
+            result = extract_from_image_with_gpt(image_bytes)
+            if not isinstance(result, dict) or "error" in result:
+                raise ValueError("GPT vision extraction failed")
+
+            if not validate_result(result):
+                print("Retrying GPT with correction prompt")
+
+                correction_prompt = f"""
+Previous extraction may be incorrect.
+
+Fix this result:
+{result}
+
+Ensure:
+- final_amount is correct payable amount
+- totals match tax calculation
+
+Return corrected JSON only.
+"""
+
+                corrected = extract_with_gpt(correction_prompt)
+                if isinstance(corrected, dict) and "error" not in corrected:
+                    result = corrected
+
+            print("GPT RESULT:", result)
+            print("CONFIDENCE:", calculate_confidence(result))
+            final_result = result
 
         else:
             # No image available; keep OCR result as safe fallback.
