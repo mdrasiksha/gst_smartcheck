@@ -1351,6 +1351,9 @@ def _extract_with_gpt(text: str, existing_data: Dict | None = None, retries: int
         "Return strict JSON object only with schema keys, no markdown.",
         "Handle OCR noise such as O/0, I/1, S/5 confusion.",
         "Do not treat percentage rates (e.g., 18%) as tax amounts.",
+        "Prefer Grand Total for Final Amount; fallback to Total Amount / Net Total only when Grand Total is absent.",
+        "Ignore handwritten notes and scribbles.",
+        "Handle proforma and quotation invoices without failing.",
         "Final Amount should approximately equal Taxable + CGST + SGST + IGST.",
         "Use null for missing values.",
     ]
@@ -1372,8 +1375,9 @@ def _extract_with_gpt(text: str, existing_data: Dict | None = None, retries: int
                     {
                         "role": "system",
                         "content": (
-                            "Extract invoice fields from OCR text using the provided schema and rules. "
-                            "Return strict JSON only."
+                            "Extract structured data from GST invoice OCR text. "
+                            "Fields: invoice_number, date, taxable_amount, final_amount mapped to the requested schema. "
+                            "Prefer Grand Total and return strict JSON only."
                         ),
                     },
                     {"role": "user", "content": json.dumps(content, ensure_ascii=False)},

@@ -10,6 +10,7 @@ from validators import validate_invoice
 from validator import validate_invoice as validate_invoice_structured
 from layout_extractor import extract_layout_fields
 from ai_extractor import extract_invoice_fields_gpt
+from extractor import extract_invoice_structured
 from excel_writer import write_to_excel
 from llm_refiner import refine_with_llm
 from cache_helper import get_cached_invoice_result, set_cached_invoice_result
@@ -309,6 +310,21 @@ def _layout_to_standard_fields(layout_data: dict) -> dict:
     }
 
 
+def _structured_to_standard_fields(parsed: dict) -> dict:
+    gst = parsed.get("gst_breakdown") if isinstance(parsed.get("gst_breakdown"), dict) else {}
+    return {
+        "Invoice Number": parsed.get("invoice_number") or None,
+        "Invoice Date": parsed.get("date") or None,
+        "Taxable Amount": _to_float(parsed.get("taxable_amount")),
+        "CGST Amount": _to_float(gst.get("cgst")),
+        "SGST Amount": _to_float(gst.get("sgst")),
+        "IGST Amount": _to_float(gst.get("igst")),
+        "Final Amount": _to_float(parsed.get("final_amount")),
+        "confidence_score": parsed.get("confidence_score"),
+        "_detected_totals": parsed.get("detected_totals") or [],
+    }
+
+
 def _merge_prefer_existing(primary: dict, secondary: dict) -> dict:
     merged = dict(primary)
     for field in _PIPELINE_FIELDS:
@@ -389,8 +405,10 @@ def _extract_data_from_document_input(document_input, source_file_name=None, det
 
     extraction_start = time.time()
     layout_data = extract_layout_fields(ocr_payload)
+    structured_data = extract_invoice_structured(ocr_payload)
     regex_data = extract_with_audit(text)
     data = _merge_prefer_existing(regex_data, _layout_to_standard_fields(layout_data))
+    data = _merge_prefer_existing(data, _structured_to_standard_fields(structured_data))
     extraction_end = time.time()
     logger.info("perf source=%s stage=extract duration=%.3fs", source_file_name or "unknown", extraction_end - extraction_start)
 
@@ -428,11 +446,20 @@ def _extract_data_from_document_input(document_input, source_file_name=None, det
     data["_calc_mismatch"] = _is_calculation_incorrect(data)
     data["_llm_fix_applied"] = False
 
-    data["confidence_score"] = _compute_confidence_score(data, ocr_payload, structured_validation)
+    data["confidence_score"] = int(structured_data.get("confidence_score") or _compute_confidence_score(data, ocr_payload, structured_validation))
+    detected_totals = structured_data.get("detected_totals") or []
+    total_values = {round(float(item.get("value")), 2) for item in detected_totals if item.get("value") is not None}
+    conflicting_totals = len(total_values) >= 2
 
     llm_future = None
     llm_start = None
-    if data["confidence_score"] < 70 or (not structured_validation.get("is_valid")) or _should_use_llm(data, status, text):
+    if (
+        data["confidence_score"] < 70
+        or (not structured_validation.get("is_valid"))
+        or _should_use_llm(data, status, text)
+        or _is_missing(data.get("Final Amount"))
+        or conflicting_totals
+    ):
         llm_start = time.time()
         llm_future = _LLM_EXECUTOR.submit(extract_invoice_fields_gpt, text, data, 2)
 
@@ -478,12 +505,23 @@ def _extract_data_from_document_input(document_input, source_file_name=None, det
                 data["_llm_fix_applied"] = False
 
     data["_calc_mismatch"] = _is_calculation_incorrect(data)
-    data["confidence_score"] = _compute_confidence_score(data, ocr_payload, validate_invoice_structured(data))
+    post_validation_score = _compute_confidence_score(data, ocr_payload, validate_invoice_structured(data))
+    data["confidence_score"] = int(max(float(data.get("confidence_score", 0)), post_validation_score))
+    logger.info(
+        "fallback_used=%s conflicting_totals=%s detected_total_candidates=%s",
+        bool(llm_future is not None),
+        conflicting_totals,
+        detected_totals[:5],
+    )
     if not _is_valid_value(data.get("Invoice Number")):
         raise ValueError("Unable to extract invoice number")
 
     if source_file_name:
         data["Source File Name"] = os.path.basename(source_file_name)
+    data["invoice_number"] = data.get("Invoice Number")
+    data["date"] = data.get("Invoice Date")
+    data["taxable_amount"] = data.get("Taxable Amount")
+    data["final_amount"] = data.get("Final Amount")
 
     logger.info("perf source=%s stage=total duration=%.3fs", source_file_name or "unknown", time.time() - total_start)
     return data, status
