@@ -10,7 +10,7 @@ from validators import validate_invoice
 from validator import validate_invoice as validate_invoice_structured
 from layout_extractor import extract_layout_fields
 from ai_extractor import extract_invoice_fields_gpt
-from gst_smartcheck.ai_extractor import extract_with_gpt
+from gst_smartcheck.ai_extractor import extract_with_gpt, extract_from_image_with_gpt
 from excel_writer import write_to_excel
 from llm_refiner import refine_with_llm
 from cache_helper import get_cached_invoice_result, set_cached_invoice_result
@@ -362,12 +362,15 @@ def _apply_llm_updates_safely(original_data: dict, improved: dict) -> dict:
 def _extract_data_from_document_input(document_input, source_file_name=None, detected_file_type=None):
     total_start = time.time()
     ocr_start = time.time()
+    image_bytes = None
     if detected_file_type == "image":
         if isinstance(document_input, (bytes, bytearray)):
-            ocr_payload = extract_text_from_image(bytes(document_input))
+            image_bytes = bytes(document_input)
+            ocr_payload = extract_text_from_image(image_bytes)
         else:
             with open(document_input, "rb") as image_file:
-                ocr_payload = extract_text_from_image(image_file.read())
+                image_bytes = image_file.read()
+            ocr_payload = extract_text_from_image(image_bytes)
     elif detected_file_type == "pdf":
         ocr_payload = extract_text_from_pdf(
             document_input,
@@ -386,7 +389,7 @@ def _extract_data_from_document_input(document_input, source_file_name=None, det
     ocr_end = time.time()
     logger.info("perf source=%s stage=ocr duration=%.3fs", source_file_name or "unknown", ocr_end - ocr_start)
 
-    if not text or len(text.strip()) < 50:
+    if (not text or len(text.strip()) < 50) and detected_file_type != "image":
         raise ValueError("OCR failed or insufficient text extracted")
 
     extraction_start = time.time()
@@ -394,8 +397,14 @@ def _extract_data_from_document_input(document_input, source_file_name=None, det
     regex_data = extract_with_audit(text)
 
     if not regex_data or not regex_data.get("Final Amount"):
-        print("Using GPT extraction fallback...")
-        gpt_data = extract_with_gpt(text)
+        gpt_data = None
+        if detected_file_type == "image" and image_bytes and (not text or len(text.strip()) < 50):
+            print("Using GPT Vision")
+            gpt_data = extract_from_image_with_gpt(image_bytes)
+        else:
+            print("Using GPT extraction fallback...")
+            gpt_data = extract_with_gpt(text)
+
         if isinstance(gpt_data, dict) and "error" not in gpt_data:
             regex_data = {
                 "Invoice Number": gpt_data.get("invoice_number"),
